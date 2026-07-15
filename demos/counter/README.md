@@ -50,7 +50,7 @@ To interact with the router locally:
 
 ```bash
 # Port-forward the Atenet Router
-kubectl port-forward -n ate-system svc/atenet-router 8000:80
+kubectl port-forward -n ate-system svc/ateway-ingress 8000:80
 ```
 
 ## How to Use

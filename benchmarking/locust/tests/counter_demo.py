@@ -50,7 +50,7 @@ tracer = get_tracer(__name__)
 # Atenet router fronts all actor traffic. Actors are addressed by setting
 # the HTTP Host header to <actor-name>.<atespace>.actors.resources.substrate.ate.dev;
 # the router resolves that to the actor's current worker pod.
-ROUTER_URL = "http://atenet-router.ate-system.svc.cluster.local"
+ROUTER_URL = "http://ateway-ingress.ate-system.svc.cluster.local"
 ACTOR_DOMAIN = "actors.resources.substrate.ate.dev"
 
 
@@ -137,7 +137,7 @@ class CounterUser(User):
         except Exception:
             pass
 
-        # 2. Run/Increment (HTTP via atenet-router)
+        # 2. Run/Increment (HTTP via ateway-ingress)
         start_time = time.time()
         with tracer.start_as_current_span("RunCounter") as span:
             headers = {"Host": self.host_header}

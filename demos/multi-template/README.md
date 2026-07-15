@@ -55,7 +55,7 @@ kubectl ate create actor f1 -a demo --template ate-demo-multi-template-fspersist
 To interact with the router locally:
 
 ```bash
-kubectl port-forward -n ate-system svc/atenet-router 8000:80
+kubectl port-forward -n ate-system svc/ateway-ingress 8000:80
 ```
 
 ## How to Use

@@ -242,12 +242,21 @@ func (s *AssignWorkerStep) findFreeWorker(
 }
 
 type CallAteletRestoreStep struct {
-	store               store.Interface
-	dialer              *AteletDialer
-	kubeClient          kubernetes.Interface
-	secretCache         *envSecretCache
-	workerPoolLister    listersv1alpha1.WorkerPoolLister
-	sandboxConfigLister listersv1alpha1.SandboxConfigLister
+	store                store.Interface
+	dialer               *AteletDialer
+	kubeClient           kubernetes.Interface
+	secretCache          *envSecretCache
+	workerPoolLister     listersv1alpha1.WorkerPoolLister
+	sandboxConfigLister  listersv1alpha1.SandboxConfigLister
+	egressGatewayAddress string
+}
+
+func (s *CallAteletRestoreStep) selectedEgressGateway(actor *ateapipb.Actor) *string {
+	if actor.GetEgressPolicy() == nil || s.egressGatewayAddress == "" {
+		return nil
+	}
+	address := s.egressGatewayAddress
+	return &address
 }
 
 func (s *CallAteletRestoreStep) Name() string { return "CallAteletRestore" }
@@ -275,6 +284,8 @@ func (s *CallAteletRestoreStep) Execute(ctx context.Context, input *ResumeInput,
 			ActorName:              state.Actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: state.Actor.GetActorTemplateNamespace(),
 			ActorTemplateName:      state.Actor.GetActorTemplateName(),
+			ActorVersion:           state.Actor.GetMetadata().GetVersion(),
+			EgressGatewayAddress:   s.selectedEgressGateway(state.Actor),
 			Spec:                   workloadSpec,
 			ActorUid:               state.Actor.GetMetadata().Uid,
 		}
@@ -312,6 +323,8 @@ func (s *CallAteletRestoreStep) Execute(ctx context.Context, input *ResumeInput,
 			ActorName:              state.Actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: state.Actor.GetActorTemplateNamespace(),
 			ActorTemplateName:      state.Actor.GetActorTemplateName(),
+			ActorVersion:           state.Actor.GetMetadata().GetVersion(),
+			EgressGatewayAddress:   s.selectedEgressGateway(state.Actor),
 			Spec:                   workloadSpec,
 			Type:                   ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL,
 			Config: &ateletpb.RestoreRequest_ExternalConfig{
@@ -341,6 +354,8 @@ func (s *CallAteletRestoreStep) Execute(ctx context.Context, input *ResumeInput,
 			ActorName:              state.Actor.GetMetadata().GetName(),
 			ActorTemplateNamespace: state.Actor.GetActorTemplateNamespace(),
 			ActorTemplateName:      state.Actor.GetActorTemplateName(),
+			ActorVersion:           state.Actor.GetMetadata().GetVersion(),
+			EgressGatewayAddress:   s.selectedEgressGateway(state.Actor),
 			SandboxAssets:          sandboxAssets,
 			Spec:                   workloadSpec,
 			ActorUid:               state.Actor.GetMetadata().Uid,

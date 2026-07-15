@@ -66,7 +66,7 @@ If running clients locally, port-forward the API and router in separate terminal
 kubectl port-forward -n ate-system svc/api 8080:443
 
 # Terminal 2: Router
-kubectl port-forward -n ate-system svc/atenet-router 8000:80
+kubectl port-forward -n ate-system svc/ateway-ingress 8000:80
 ```
 
 ## How to Use the Client

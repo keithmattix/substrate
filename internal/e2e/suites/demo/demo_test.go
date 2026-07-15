@@ -640,18 +640,18 @@ func callActorOnce(t *testing.T, atespace, actorName string) (string, error) {
 	t.Helper()
 	clients := e2e.GetClients()
 
-	svc, err := clients.K8s.CoreV1().Services("ate-system").Get(context.Background(), "atenet-router", metav1.GetOptions{})
+	svc, err := clients.K8s.CoreV1().Services("ate-system").Get(context.Background(), "ateway-ingress", metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("failed to get atenet-router service: %w", err)
+		return "", fmt.Errorf("failed to get ateway-ingress service: %w", err)
 	}
 
 	selector := labels.SelectorFromSet(svc.Spec.Selector).String()
 	pods, err := clients.K8s.CoreV1().Pods("ate-system").List(context.Background(), metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
-		return "", fmt.Errorf("failed to list atenet-router pods: %w", err)
+		return "", fmt.Errorf("failed to list ateway-ingress pods: %w", err)
 	}
 	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("no atenet-router pods found")
+		return "", fmt.Errorf("no ateway-ingress pods found")
 	}
 	targetPod := pods.Items[0]
 

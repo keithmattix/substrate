@@ -114,6 +114,17 @@ message ResourceMetadata {
   google.protobuf.Timestamp update_time = 6;
 }
 
+// ActorEgressPolicy describes the destinations an Actor may connect to.
+// Additional per-host settings can be added to ActorEgressHost as the policy
+// model grows.
+message ActorEgressPolicy {
+  repeated ActorEgressHost hosts = 1;
+}
+
+message ActorEgressHost {
+  string hostname = 1;
+}
+
 message Actor {
   // Common resource metadata: atespace, name, uid, version, timestamps.
   ResourceMetadata metadata = 1;
@@ -154,6 +165,10 @@ message Actor {
   // suspend/pause since eligibility is no longer a single fixed pool
   // reference on the ActorTemplate.
   string worker_pool_name = 12;
+
+  // egress_policy opts the Actor into gateway-enforced egress. An absent policy
+  // uses direct egress. A present policy with no hosts permits no destinations.
+  ActorEgressPolicy egress_policy = 13;
 }
 
 // Atespace is the isolation boundary an Actor is created into. Global-scoped:
@@ -223,6 +238,10 @@ message UpdateActorRequest {
   // worker_selector replaces the actor's current placement constraint.
   // Takes effect on the next ResumeActor call.
   Selector worker_selector = 2;
+
+  // If present, replaces the Actor's egress policy. Send an empty policy to
+  // clear all allowed hosts. If absent, the existing policy is preserved.
+  ActorEgressPolicy egress_policy = 3;
 }
 
 message UpdateActorResponse {

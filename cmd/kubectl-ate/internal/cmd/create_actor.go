@@ -26,6 +26,7 @@ import (
 
 var templateFlag string
 var atespaceFlag string
+var egressHostsFlag []string
 
 var createActorCmd = &cobra.Command{
 	Use:   "actor <actor-name>",
@@ -45,15 +46,25 @@ var createActorCmd = &cobra.Command{
 			return fmt.Errorf("malformed --template: %s (expected <namespace>/<name>)", templateFlag)
 		}
 
-		resp, err := apiClient.CreateActor(ctx, &ateapipb.CreateActorRequest{
-			Actor: &ateapipb.Actor{
-				Metadata: &ateapipb.ResourceMetadata{
-					Atespace: atespaceFlag,
-					Name:     actorName,
-				},
-				ActorTemplateNamespace: parts[0],
-				ActorTemplateName:      parts[1],
+		actor := &ateapipb.Actor{
+			Metadata: &ateapipb.ResourceMetadata{
+				Atespace: atespaceFlag,
+				Name:     actorName,
 			},
+			ActorTemplateNamespace: parts[0],
+			ActorTemplateName:      parts[1],
+		}
+		if len(egressHostsFlag) > 0 {
+			actor.EgressPolicy = &ateapipb.ActorEgressPolicy{
+				Hosts: make([]*ateapipb.ActorEgressHost, 0, len(egressHostsFlag)),
+			}
+			for _, hostname := range egressHostsFlag {
+				actor.EgressPolicy.Hosts = append(actor.EgressPolicy.Hosts, &ateapipb.ActorEgressHost{Hostname: hostname})
+			}
+		}
+
+		resp, err := apiClient.CreateActor(ctx, &ateapipb.CreateActorRequest{
+			Actor: actor,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create actor: %w", err)
@@ -68,5 +79,6 @@ func init() {
 	_ = createActorCmd.MarkFlagRequired("template")
 	createActorCmd.Flags().StringVarP(&atespaceFlag, "atespace", "a", "", "Atespace to create the actor in (required)")
 	_ = createActorCmd.MarkFlagRequired("atespace")
+	createActorCmd.Flags().StringSliceVar(&egressHostsFlag, "egress-host", nil, "Hostname the actor may connect to (repeatable)")
 	createCmd.AddCommand(createActorCmd)
 }

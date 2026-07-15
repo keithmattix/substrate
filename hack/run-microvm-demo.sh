@@ -170,8 +170,8 @@ cat <<EOF
        kubectl ate${KCTX_FLAG} create actor my-counter-1 -a demo \\
          --template ate-demo-counter-microvm/counter-microvm
 
-  3. Port-forward the atenet-router and curl the in-RAM counter:
-       kubectl${KCTX_FLAG} port-forward -n ate-system svc/atenet-router 8000:80 &
+  3. Port-forward ateway-ingress and curl the in-RAM counter:
+	   kubectl${KCTX_FLAG} port-forward -n ate-system svc/ateway-ingress 8000:80 &
        curl -X POST -H "Host: my-counter-1.demo.actors.resources.substrate.ate.dev" \\
          http://localhost:8000
 

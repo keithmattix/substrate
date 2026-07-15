@@ -259,6 +259,8 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 		ActorName:              actorName,
 		ActorTemplateNamespace: req.GetActorTemplateNamespace(),
 		ActorTemplateName:      req.GetActorTemplateName(),
+		ActorVersion:           req.GetActorVersion(),
+		EgressGatewayAddress:   req.EgressGatewayAddress,
 		RunscPath:              runscPathFor(assetPaths),
 		RuntimeAssetPaths:      assetPaths,
 		Spec:                   buildAteomWorkloadSpec(req.GetSpec()),
@@ -556,6 +558,8 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		ActorName:              actorName,
 		ActorTemplateNamespace: req.GetActorTemplateNamespace(),
 		ActorTemplateName:      req.GetActorTemplateName(),
+		ActorVersion:           req.GetActorVersion(),
+		EgressGatewayAddress:   req.EgressGatewayAddress,
 		RunscPath:              runscPathFor(assetPaths),
 		RuntimeAssetPaths:      assetPaths,
 		Spec:                   buildAteomWorkloadSpec(req.GetSpec()),
@@ -840,6 +844,9 @@ func (d *AteomDialer) DialAteomPod(ctx context.Context, podUID string) (*grpc.Cl
 // internal/resources so other components can apply them at their boundaries.
 func validateRunRequest(req *ateletpb.RunRequest) error {
 	var errs field.ErrorList
+	if req.GetActorVersion() < 1 {
+		errs = append(errs, field.Invalid(field.NewPath("actor_version"), req.GetActorVersion(), "must be positive"))
+	}
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)
@@ -910,6 +917,9 @@ func validateCheckpointRequest(req *ateletpb.CheckpointRequest) error {
 
 func validateRestoreRequest(req *ateletpb.RestoreRequest) error {
 	var errs field.ErrorList
+	if req.GetActorVersion() < 1 {
+		errs = append(errs, field.Invalid(field.NewPath("actor_version"), req.GetActorVersion(), "must be positive"))
+	}
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)

@@ -1,0 +1,181 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ateway-egress
+  namespace: ate-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ateway-egress
+  namespace: ate-system
+data:
+  config.yaml: |
+    config:
+      tracing: {}
+    frontendPolicies:
+      connect:
+        mode: tunnel
+    gateways:
+      egress:
+        port: 443
+        tls:
+          cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+          key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+          root: /run/podidentity.podcert.ate.dev/trust-bundle.pem
+    binds:
+    - port: 80
+      mode: internal
+      listeners:
+      - name: egress-http
+        protocol: HTTP
+        routes:
+        - name: actor-egress-http
+          policies:
+            substrateEgress: {}
+          backends:
+          - dynamic: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ateway-egress
+  namespace: ate-system
+  labels:
+    app: ateway-egress
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ateway-egress
+  template:
+    metadata:
+      labels:
+        app: ateway-egress
+    spec:
+      serviceAccountName: ateway-egress
+      securityContext:
+        sysctls:
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
+      containers:
+      - name: agentgateway
+        image: localhost:5000/agentgateway:1784305144
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 65532
+        args:
+        - -f
+        - /etc/agentgateway/config.yaml
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.pod.uid=$(POD_UID),service.instance.id=$(POD_UID)
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://opentelemetry-collector.otel-system.svc:4317
+        - name: OTEL_SERVICE_NAME
+          value: ateway-egress
+        ports:
+        - name: https
+          containerPort: 443
+        - name: admin
+          containerPort: 15000
+        - name: health
+          containerPort: 15021
+        readinessProbe:
+          httpGet:
+            path: /healthz/ready
+            port: health
+          periodSeconds: 10
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /healthz/ready
+            port: health
+          periodSeconds: 1
+          successThreshold: 1
+          timeoutSeconds: 2
+        volumeMounts:
+        - name: config
+          mountPath: /etc/agentgateway
+          readOnly: true
+        - name: servicedns
+          mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: podidentity
+          mountPath: /run/podidentity.podcert.ate.dev
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: ateway-egress
+      - name: servicedns
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      - name: podidentity
+        projected:
+          sources:
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ateway-egress
+  namespace: ate-system
+spec:
+  type: ClusterIP
+  selector:
+    app: ateway-egress
+  ports:
+  - name: https
+    port: 443
+    targetPort: https
+    protocol: TCP
