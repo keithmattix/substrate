@@ -24,8 +24,8 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:     "atenet",
-	Short:   "atenet is a combined daemon for all networking functionality.",
-	Long:    `atenet is a combined daemon for all networking functionality.`,
+	Short:   "atenet manages Actor DNS resolution.",
+	Long:    `atenet manages Actor DNS resolution.`,
 	Version: version.String(),
 }
 
@@ -37,6 +37,5 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.AddCommand(NewRouterCmd())
 	rootCmd.AddCommand(NewDnsCmd())
 }

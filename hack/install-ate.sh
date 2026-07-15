@@ -305,7 +305,6 @@ deploy_ate_system() {
   log_step "Waiting for ATE system components to be ready..."
   run_kubectl rollout status deployment/ate-api-server -n ate-system --timeout=120s
   run_kubectl rollout status deployment/ate-controller -n ate-system --timeout=120s
-  run_kubectl rollout status deployment/atenet-router -n ate-system --timeout=120s
   run_kubectl rollout status statefulset/valkey-cluster -n ate-system --timeout=120s
   run_kubectl rollout status daemonset/atelet -n ate-system --timeout=120s
 }
@@ -368,9 +367,7 @@ deploy_atenet() {
   run_kubectl apply -f manifests/ate-install/ate-system-namespace.yaml \
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
-  run_ko apply -f manifests/ate-install/atenet-router.yaml
   run_ko apply -f manifests/ate-install/atenet-dns.yaml
-  run_kubectl rollout status deployment/atenet-router -n ate-system --timeout=120s
   run_kubectl rollout status deployment/atenet-dns -n ate-system --timeout=120s
 }
 
@@ -484,7 +481,7 @@ delete_ate_system() {
 
 delete_atenet() {
   log_step "delete_atenet"
-  run_kubectl delete --ignore-not-found -f manifests/ate-install/atenet-router.yaml
+  run_kubectl delete --ignore-not-found -f manifests/ate-install/atenet-dns.yaml
 }
 
 deploy_benchmarks() {
