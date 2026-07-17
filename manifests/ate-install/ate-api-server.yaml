@@ -81,7 +81,6 @@ spec:
         args:
           - "--grpc-listen-addr=0.0.0.0:443"
           - "--grpc-server-cred-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
-          - "--egress-gateway-address=ateway-egress.ate-system.svc:443"
           - --redis-cluster-address=@env
           - --redis-ca-certs=/etc/valkey-ca/ca.crt
           - --redis-use-iam-auth=@env

@@ -1,12 +1,9 @@
 # Egress Demo
 
 This demo runs an Actor that accepts `{"url":"..."}`, sends an HTTP GET to
-that URL, and returns the upstream status and body. It is intended to exercise
-Substrate's per-Actor egress allowlist.
-
-Only Actors with an egress policy are redirected through the egress gateway.
-Actors created without `--egress-host` use direct egress. A present policy with
-an empty host list is an explicit deny-all policy.
+that URL, and returns the upstream status and body. It is a fixture for future
+end-to-end egress gateway tests. The gateway and tunnel plumbing are installed,
+but the public Actor API does not yet provide a way to opt into tunneled egress.
 
 Deploy the WorkerPool and ActorTemplate:
 
@@ -14,18 +11,17 @@ Deploy the WorkerPool and ActorTemplate:
 ./hack/install-ate.sh --deploy-demo-egress
 ```
 
-Create an Actor that may connect only to `example.com`:
+Create an Actor:
 
 ```bash
 kubectl ate create atespace demo
 kubectl ate create actor egress-demo \
   --atespace demo \
-  --template ate-demo-egress/egress \
-  --egress-host example.com
+  --template ate-demo-egress/egress
 kubectl port-forward -n ate-system service/ateway-ingress 8000:80
 ```
 
-Fetch an allowed URL through the Actor:
+Fetch a URL through the Actor's current direct-egress path:
 
 ```bash
 curl -X POST http://localhost:8000/ \
@@ -34,11 +30,9 @@ curl -X POST http://localhost:8000/ \
   -d '{"url":"http://example.com/"}'
 ```
 
-A request for another hostname, such as `http://example.org/`, should fail.
-
 ## E2E test
 
-Deploy this demo, then run the networking suite:
+Deploy this demo, then run the networking ingress suite:
 
 ```bash
 ./hack/run-e2e-kind.sh ./internal/e2e/suites/networking

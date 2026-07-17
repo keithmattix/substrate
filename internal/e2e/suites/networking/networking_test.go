@@ -16,7 +16,6 @@ package networking
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,29 +27,6 @@ import (
 )
 
 const networkingAtespace = "networking-e2e"
-
-type fetchResponse struct {
-	StatusCode int    `json:"statusCode"`
-	Body       string `json:"body"`
-	Error      string `json:"error"`
-}
-
-func TestActorEgressAllowlist(t *testing.T) {
-	ctx := context.Background()
-	actorID, _ := createAndResumeActor(t, ctx, "fetcher", "example.com")
-	outer := mustRouterClient(t, ctx)
-	defer outer.Close()
-
-	allowed := fetch(t, ctx, outer, actorID, "http://example.com/")
-	if allowed.StatusCode != http.StatusOK {
-		t.Fatalf("allowed request returned upstream status %d, want 200; error=%q", allowed.StatusCode, allowed.Error)
-	}
-
-	blocked := fetch(t, ctx, outer, actorID, "http://example.org/")
-	if blocked.StatusCode >= 200 && blocked.StatusCode < 300 {
-		t.Fatalf("non-allowlisted request unexpectedly succeeded: %+v", blocked)
-	}
-}
 
 func TestActorDirectAccess(t *testing.T) {
 	ctx := context.Background()
@@ -78,19 +54,12 @@ func TestActorDirectAccess(t *testing.T) {
 	})
 }
 
-func createAndResumeActor(t *testing.T, ctx context.Context, prefix string, egressHosts ...string) (string, *ateapipb.Actor) {
+func createAndResumeActor(t *testing.T, ctx context.Context, prefix string) (string, *ateapipb.Actor) {
 	t.Helper()
 	clients := e2e.GetClients()
 	actorID := fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
 	actorRef := &ateapipb.ObjectRef{Atespace: networkingAtespace, Name: actorID}
 
-	var egressPolicy *ateapipb.ActorEgressPolicy
-	if egressHosts != nil {
-		egressPolicy = &ateapipb.ActorEgressPolicy{}
-		for _, hostname := range egressHosts {
-			egressPolicy.Hosts = append(egressPolicy.Hosts, &ateapipb.ActorEgressHost{Hostname: hostname})
-		}
-	}
 	t.Logf("creating actor %s/%s", networkingAtespace, actorID)
 	_, _ = clients.SubstrateAPI.CreateAtespace(ctx, &ateapipb.CreateAtespaceRequest{
 		Atespace: &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: networkingAtespace}},
@@ -99,7 +68,6 @@ func createAndResumeActor(t *testing.T, ctx context.Context, prefix string, egre
 		Metadata:               &ateapipb.ResourceMetadata{Atespace: networkingAtespace, Name: actorID},
 		ActorTemplateNamespace: "ate-demo-egress",
 		ActorTemplateName:      "egress",
-		EgressPolicy:           egressPolicy,
 	}}); err != nil {
 		t.Fatalf("CreateActor: %v (deploy the fixture with --deploy-demo-egress)", err)
 	}
@@ -123,37 +91,6 @@ func mustRouterClient(t *testing.T, ctx context.Context) *e2e.RouterClient {
 		t.Fatalf("NewRouterClient: %v", err)
 	}
 	return router
-}
-
-func fetch(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorID, targetURL string) fetchResponse {
-	t.Helper()
-	t.Logf("requesting %s through actor %s/%s", targetURL, networkingAtespace, actorID)
-	payload, err := json.Marshal(map[string]string{"url": targetURL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := router.PostJSON(ctx, networkingAtespace, actorID, "/", payload)
-	if err != nil {
-		t.Fatalf("POST to Actor: %v", err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatalf("reading Actor response body (HTTP %d): %v", response.StatusCode, err)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Logf("Actor request returned HTTP %d; full body: %s", response.StatusCode, body)
-	}
-
-	var result fetchResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("decoding Actor response (HTTP %d, body %q): %v", response.StatusCode, body, err)
-	}
-	if result.StatusCode == 0 {
-		result.StatusCode = response.StatusCode
-	}
-	t.Logf("request to %s returned upstream HTTP %d", targetURL, result.StatusCode)
-	return result
 }
 
 func assertDirectActorAccess(t *testing.T, ctx context.Context, clients *e2e.Clients, actor *ateapipb.Actor) {

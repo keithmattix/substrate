@@ -67,7 +67,6 @@ func (s *Service) CreateActor(ctx context.Context, req *ateapipb.CreateActorRequ
 		ActorTemplateNamespace: templateNamespace,
 		ActorTemplateName:      templateName,
 		WorkerSelector:         in.GetWorkerSelector(),
-		EgressPolicy:           in.GetEgressPolicy(),
 	}
 	stored, err := s.persistence.CreateActor(ctx, actor)
 	if err != nil {
@@ -121,41 +120,11 @@ func validateCreateActorRequest(req *ateapipb.CreateActorRequest) error {
 	if val := actor.GetWorkerSelector(); val != nil {
 		errs = append(errs, validateSelector(val, actorPath.Child("worker_selector"))...)
 	}
-	if val := actor.GetEgressPolicy(); val != nil {
-		errs = append(errs, validateEgressPolicy(val, actorPath.Child("egress_policy"))...)
-	}
 
 	if len(errs) > 0 {
 		return status.Error(codes.InvalidArgument, errs.ToAggregate().Error())
 	}
 	return nil
-}
-
-func validateEgressPolicy(policy *ateapipb.ActorEgressPolicy, fldPath *field.Path) field.ErrorList {
-	const maxEgressHosts = 64
-
-	if len(policy.GetHosts()) > maxEgressHosts {
-		return field.ErrorList{field.TooMany(fldPath.Child("hosts"), len(policy.GetHosts()), maxEgressHosts)}
-	}
-
-	var errs field.ErrorList
-	seen := make(map[string]struct{}, len(policy.GetHosts()))
-	for i, host := range policy.GetHosts() {
-		hostPath := fldPath.Child("hosts").Index(i).Child("hostname")
-		hostname := host.GetHostname()
-		if hostname == "" {
-			errs = append(errs, field.Required(hostPath, ""))
-			continue
-		}
-		for _, msg := range content.IsDNS1123Subdomain(hostname) {
-			errs = append(errs, field.Invalid(hostPath, hostname, msg))
-		}
-		if _, ok := seen[hostname]; ok {
-			errs = append(errs, field.Duplicate(hostPath, hostname))
-		}
-		seen[hostname] = struct{}{}
-	}
-	return errs
 }
 
 func validateSelector(sel *ateapipb.Selector, fldPath *field.Path) field.ErrorList {

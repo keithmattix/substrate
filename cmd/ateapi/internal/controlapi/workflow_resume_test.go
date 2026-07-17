@@ -27,23 +27,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestSelectedEgressGateway(t *testing.T) {
-	step := &CallAteletRestoreStep{egressGatewayAddress: "ateway-egress.ate-system.svc:443"}
-
-	if got := step.selectedEgressGateway(&ateapipb.Actor{}); got != nil {
-		t.Fatalf("selectedEgressGateway(actor without policy) = %q, want nil", *got)
-	}
-	got := step.selectedEgressGateway(&ateapipb.Actor{EgressPolicy: &ateapipb.ActorEgressPolicy{}})
-	if got == nil || *got != "ateway-egress.ate-system.svc:443" {
-		t.Fatalf("selectedEgressGateway(actor with policy) = %v, want ateway-egress.ate-system.svc:443", got)
-	}
-
-	step.egressGatewayAddress = ""
-	if got := step.selectedEgressGateway(&ateapipb.Actor{EgressPolicy: &ateapipb.ActorEgressPolicy{}}); got != nil {
-		t.Fatalf("selectedEgressGateway(unconfigured) = %q, want nil", *got)
-	}
-}
-
 func TestIsWorkerEligibleForActor(t *testing.T) {
 	tests := []struct {
 		name             string

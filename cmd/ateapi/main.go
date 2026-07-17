@@ -68,9 +68,8 @@ var (
 	clientJWTAudience    = pflag.String("client-jwt-audience", "", "The expected audience for client JWTs.")
 	sessionIDJWTPoolFile = pflag.String("session-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing session JWTs")
 
-	sessionIDCAPoolFile  = pflag.String("session-id-ca-pool", "", "The file that contains the CA pool for signing session JWTs")
-	workerpoolCACerts    = pflag.String("workerpool-ca-certs", "", "The file that contains the CA for verifying workerpool client certificates.")
-	egressGatewayAddress = pflag.String("egress-gateway-address", "ateway-egress.ate-system.svc:443", "Remote egress gateway assigned to Actors that have an egress policy.")
+	sessionIDCAPoolFile = pflag.String("session-id-ca-pool", "", "The file that contains the CA pool for signing session JWTs")
+	workerpoolCACerts   = pflag.String("workerpool-ca-certs", "", "The file that contains the CA for verifying workerpool client certificates.")
 
 	showVersion     = pflag.Bool("version", false, "Print version and exit.")
 	authMode        = pflag.String("auth-mode", "mtls", "Auth mode for incoming gRPC: mtls|jwt. 'mtls' (default) relies on transport-level mTLS for client identity. 'jwt' additionally requires a Kubernetes ServiceAccount Bearer token on every RPC. Substrate will drop support for JWT auth mode once the Pod Certificates feature is enabled by default in the minimum supported Kubernetes version.")
@@ -153,7 +152,7 @@ func main() {
 	ateFactory.WaitForCacheSync(stopCh)
 
 	dialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer())
-	sm := controlapi.NewService(redisPersistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, dialer, clientset, *egressGatewayAddress)
+	sm := controlapi.NewService(redisPersistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, dialer, clientset)
 
 	jwtIssuerDiscoveryClient := buildK8sServiceAccountIssuerDiscoveryClient(ctx, *clientJWTCAFile, *clientJWTIssuer)
 	if authModeParsed == ateapiauth.ModeJWT && jwtIssuerDiscoveryClient == nil {
@@ -242,7 +241,6 @@ func logFlagValues(ctx context.Context) {
 		slog.String("session-id-jwt-pool", *sessionIDJWTPoolFile),
 		slog.String("session-id-ca-pool", *sessionIDCAPoolFile),
 		slog.String("workerpool-ca-certs", *workerpoolCACerts),
-		slog.String("egress-gateway-address", *egressGatewayAddress),
 		slog.String("auth-mode", *authMode),
 	)
 }

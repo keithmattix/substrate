@@ -310,7 +310,7 @@ func setupTest(t *testing.T, ns string) *testContext {
 	}
 
 	dialer := NewAteletDialer(workerInformer.GetIndexer(), ateletInformer.GetIndexer())
-	service := NewService(persistence, wc, actorTemplateLister, workerPoolLister, sandboxConfigLister, dialer, k8sClient, "ateway-egress.ate-system.svc:443")
+	service := NewService(persistence, wc, actorTemplateLister, workerPoolLister, sandboxConfigLister, dialer, k8sClient)
 
 	// 5. Start REAL gRPC Server for ATE API
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(ateinterceptors.ServerUnaryInterceptor))
@@ -396,14 +396,6 @@ func selectorLabelsOfSize(n int) map[string]string {
 		labels[fmt.Sprintf("k%d", i)] = "v"
 	}
 	return labels
-}
-
-func egressHostsOfSize(n int) []*ateapipb.ActorEgressHost {
-	hosts := make([]*ateapipb.ActorEgressHost, 0, n)
-	for i := 0; i < n; i++ {
-		hosts = append(hosts, &ateapipb.ActorEgressHost{Hostname: fmt.Sprintf("host-%d.example.com", i)})
-	}
-	return hosts
 }
 
 func createTemplate(t *testing.T, tc *testContext, ns string) {
@@ -718,13 +710,10 @@ func TestCreateActor_Success(t *testing.T) {
 		ActorTemplateNamespace: ns,
 		ActorTemplateName:      "tmpl1",
 		WorkerSelector:         &ateapipb.Selector{MatchLabels: map[string]string{"tier": "free"}},
-		EgressPolicy: &ateapipb.ActorEgressPolicy{Hosts: []*ateapipb.ActorEgressHost{
-			{Hostname: "api.example.com"},
-		}},
-		Status:            ateapipb.Actor_STATUS_RUNNING,
-		AteomPodNamespace: "caller-ns",
-		AteomPodName:      "caller-pod",
-		WorkerPoolName:    "caller-pool",
+		Status:                 ateapipb.Actor_STATUS_RUNNING,
+		AteomPodNamespace:      "caller-ns",
+		AteomPodName:           "caller-pod",
+		WorkerPoolName:         "caller-pool",
 	}})
 	if err != nil {
 		t.Fatalf("CreateActor failed: %v", err)
@@ -736,9 +725,6 @@ func TestCreateActor_Success(t *testing.T) {
 		ActorTemplateName:      "tmpl1",
 		Status:                 ateapipb.Actor_STATUS_SUSPENDED,
 		WorkerSelector:         &ateapipb.Selector{MatchLabels: map[string]string{"tier": "free"}},
-		EgressPolicy: &ateapipb.ActorEgressPolicy{Hosts: []*ateapipb.ActorEgressHost{
-			{Hostname: "api.example.com"},
-		}},
 	}
 
 	// The diff below ignores the server-assigned uid/timestamps (non-deterministic),
@@ -1171,6 +1157,9 @@ func TestResumeActor(t *testing.T) {
 	restoreReq := tc.fakeAtelet.lastRestoreRequest()
 	if restoreReq == nil || restoreReq.GetActorVersion() < 1 {
 		t.Fatalf("Restore actor_version = %v, want a positive version", restoreReq)
+	}
+	if restoreReq.EgressGatewayAddress != nil {
+		t.Fatalf("Restore egress_gateway_address = %q, want absent until the Actor egress API is available", restoreReq.GetEgressGatewayAddress())
 	}
 
 	getResp, err := tc.client.GetActor(context.Background(), &ateapipb.GetActorRequest{
@@ -1684,8 +1673,8 @@ func TestPauseActor(t *testing.T) {
 	}
 }
 
-// TestUpdateActor_Success verifies UpdateActor replaces mutable actor fields,
-// preserves an omitted egress policy, and durably persists policy changes.
+// TestUpdateActor_Success verifies UpdateActor replaces the actor's
+// worker_selector and that the change is durably persisted.
 func TestUpdateActor_Success(t *testing.T) {
 	ns := namespaceForTest("ns-update-actor")
 	tc := setupTest(t, ns)
@@ -1700,9 +1689,6 @@ func TestUpdateActor_Success(t *testing.T) {
 		WorkerSelector: &ateapipb.Selector{
 			MatchLabels: map[string]string{"tier": "free"},
 		},
-		EgressPolicy: &ateapipb.ActorEgressPolicy{Hosts: []*ateapipb.ActorEgressHost{
-			{Hostname: "api.example.com"},
-		}},
 	}})
 	if err != nil {
 		t.Fatalf("CreateActor failed: %v", err)
@@ -1726,9 +1712,6 @@ func TestUpdateActor_Success(t *testing.T) {
 		WorkerSelector: &ateapipb.Selector{
 			MatchLabels: map[string]string{"tier": "paid"},
 		},
-		EgressPolicy: &ateapipb.ActorEgressPolicy{Hosts: []*ateapipb.ActorEgressHost{
-			{Hostname: "api.example.com"},
-		}},
 	}
 	wantUpdateResp := &ateapipb.UpdateActorResponse{Actor: wantActor}
 	if diff := cmp.Diff(wantUpdateResp, updateResp, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
@@ -1742,27 +1725,6 @@ func TestUpdateActor_Success(t *testing.T) {
 	wantGetResp := wantActor
 	if diff := cmp.Diff(wantGetResp, getResp, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
 		t.Errorf("GetActor response mismatch after UpdateActor (-want +got):\n%s", diff)
-	}
-
-	policyResp, err := tc.client.UpdateActor(context.Background(), &ateapipb.UpdateActorRequest{
-		Actor:          &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"},
-		WorkerSelector: wantActor.GetWorkerSelector(),
-		EgressPolicy: &ateapipb.ActorEgressPolicy{Hosts: []*ateapipb.ActorEgressHost{
-			{Hostname: "new.example.com"},
-		}},
-	})
-	if err != nil {
-		t.Fatalf("UpdateActor egress policy failed: %v", err)
-	}
-	if got := policyResp.GetActor().GetMetadata().GetVersion(); got != 3 {
-		t.Errorf("updated Actor version = %d, want 3", got)
-	}
-	if diff := cmp.Diff(
-		[]*ateapipb.ActorEgressHost{{Hostname: "new.example.com"}},
-		policyResp.GetActor().GetEgressPolicy().GetHosts(),
-		protocmp.Transform(),
-	); diff != "" {
-		t.Errorf("updated egress hosts mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -2062,26 +2024,6 @@ func TestValidation(t *testing.T) {
 				ActorTemplateName:      "tmpl1",
 				WorkerSelector:         &ateapipb.Selector{MatchLabels: selectorLabelsOfSize(11)}}},
 			"actor.worker_selector.match_labels: Too many",
-		}, {
-			"invalid egress hostname",
-			&ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
-				Metadata:               &ateapipb.ResourceMetadata{Atespace: "ns1", Name: "id1"},
-				ActorTemplateNamespace: "ns1",
-				ActorTemplateName:      "tmpl1",
-				EgressPolicy: &ateapipb.ActorEgressPolicy{Hosts: []*ateapipb.ActorEgressHost{
-					{Hostname: "Not Valid"},
-				}},
-			}},
-			`actor.egress_policy.hosts\[0\].hostname: Invalid value`,
-		}, {
-			"too many egress hosts",
-			&ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
-				Metadata:               &ateapipb.ResourceMetadata{Atespace: "ns1", Name: "id1"},
-				ActorTemplateNamespace: "ns1",
-				ActorTemplateName:      "tmpl1",
-				EgressPolicy:           &ateapipb.ActorEgressPolicy{Hosts: egressHostsOfSize(65)},
-			}},
-			"actor.egress_policy.hosts: Too many",
 		}}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -2312,15 +2254,6 @@ func TestValidation(t *testing.T) {
 				Actor:          &ateapipb.ObjectRef{Atespace: "ns1", Name: "id1"},
 				WorkerSelector: &ateapipb.Selector{MatchLabels: selectorLabelsOfSize(11)}},
 			"worker_selector.match_labels: Too many",
-		}, {
-			"invalid egress hostname",
-			&ateapipb.UpdateActorRequest{
-				Actor: &ateapipb.ObjectRef{Atespace: "ns1", Name: "id1"},
-				EgressPolicy: &ateapipb.ActorEgressPolicy{Hosts: []*ateapipb.ActorEgressHost{
-					{Hostname: "Not Valid"},
-				}},
-			},
-			`egress_policy.hosts\[0\].hostname: Invalid value`,
 		}}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {

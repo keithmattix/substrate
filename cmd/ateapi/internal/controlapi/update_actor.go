@@ -40,9 +40,6 @@ func (s *Service) UpdateActor(ctx context.Context, req *ateapipb.UpdateActorRequ
 		return nil, fmt.Errorf("while getting actor: %w", err)
 	}
 	actor.WorkerSelector = req.GetWorkerSelector()
-	if req.EgressPolicy != nil {
-		actor.EgressPolicy = req.GetEgressPolicy()
-	}
 
 	updated, err := s.persistence.UpdateActor(ctx, actor, actor.GetMetadata().GetVersion())
 	if err != nil {
@@ -67,9 +64,6 @@ func validateUpdateActorRequest(req *ateapipb.UpdateActorRequest) error {
 
 	if val := req.WorkerSelector; val != nil {
 		errs = append(errs, validateSelector(val, fldPath.Child("worker_selector"))...)
-	}
-	if val := req.EgressPolicy; val != nil {
-		errs = append(errs, validateEgressPolicy(val, fldPath.Child("egress_policy"))...)
 	}
 
 	if len(errs) > 0 {

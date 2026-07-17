@@ -115,15 +115,14 @@ func runStep[Params any, Context any](ctx context.Context, params Params, wCtx C
 
 // ActorWorkflow handles the workflows for actor's resume / suspend operations.
 type ActorWorkflow struct {
-	store                store.Interface
-	workerCache          *workercache.Cache
-	dialer               *AteletDialer
-	actorTemplateLister  listersv1alpha1.ActorTemplateLister
-	workerPoolLister     listersv1alpha1.WorkerPoolLister
-	sandboxConfigLister  listersv1alpha1.SandboxConfigLister
-	kubeClient           kubernetes.Interface
-	secretCache          *envSecretCache
-	egressGatewayAddress string
+	store               store.Interface
+	workerCache         *workercache.Cache
+	dialer              *AteletDialer
+	actorTemplateLister listersv1alpha1.ActorTemplateLister
+	workerPoolLister    listersv1alpha1.WorkerPoolLister
+	sandboxConfigLister listersv1alpha1.SandboxConfigLister
+	kubeClient          kubernetes.Interface
+	secretCache         *envSecretCache
 }
 
 // NewActorWorkflow creates a new ActorWorkflow.
@@ -135,18 +134,16 @@ func NewActorWorkflow(
 	workerPoolLister listersv1alpha1.WorkerPoolLister,
 	sandboxConfigLister listersv1alpha1.SandboxConfigLister,
 	kubeClient kubernetes.Interface,
-	egressGatewayAddress string,
 ) *ActorWorkflow {
 	return &ActorWorkflow{
-		store:                store,
-		workerCache:          workerCache,
-		dialer:               dialer,
-		actorTemplateLister:  actorTemplateLister,
-		workerPoolLister:     workerPoolLister,
-		sandboxConfigLister:  sandboxConfigLister,
-		kubeClient:           kubeClient,
-		secretCache:          newEnvSecretCache(envSecretCacheTTL),
-		egressGatewayAddress: egressGatewayAddress,
+		store:               store,
+		workerCache:         workerCache,
+		dialer:              dialer,
+		actorTemplateLister: actorTemplateLister,
+		workerPoolLister:    workerPoolLister,
+		sandboxConfigLister: sandboxConfigLister,
+		kubeClient:          kubeClient,
+		secretCache:         newEnvSecretCache(envSecretCacheTTL),
 	}
 }
 
@@ -170,7 +167,7 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, atespace, name string, 
 	steps := []WorkflowStep[*ResumeInput, *ResumeState]{
 		&LoadActorForResumeStep{store: w.store, actorTemplateLister: w.actorTemplateLister},
 		&AssignWorkerStep{store: w.store, workerCache: w.workerCache},
-		&CallAteletRestoreStep{store: w.store, dialer: w.dialer, kubeClient: w.kubeClient, secretCache: w.secretCache, workerPoolLister: w.workerPoolLister, sandboxConfigLister: w.sandboxConfigLister, egressGatewayAddress: w.egressGatewayAddress},
+		&CallAteletRestoreStep{store: w.store, dialer: w.dialer, kubeClient: w.kubeClient, secretCache: w.secretCache, workerPoolLister: w.workerPoolLister, sandboxConfigLister: w.sandboxConfigLister},
 		&FinalizeRunningStep{store: w.store},
 	}
 
