@@ -80,7 +80,8 @@ spec:
           value: "0"
       containers:
       - name: agentgateway
-        image: localhost:5000/agentgateway:1784305474
+        # TODO: replace with official image once general direction is approved
+        image: ghcr.io/howardjohn-dev/agentgateway:v0.0.0-substrate.3
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -115,8 +116,6 @@ spec:
           containerPort: 80
         - name: https
           containerPort: 443
-        - name: admin
-          containerPort: 15000
         - name: health
           containerPort: 15021
         readinessProbe:
