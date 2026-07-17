@@ -46,7 +46,13 @@ data:
         routes:
         - name: actor-egress-http
           policies:
-            substrateEgress: {}
+            substrateEgress:
+              host: https://api.ate-system.svc
+              policies:
+                backendTLS:
+                  cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  root: /run/servicedns.podcert.ate.dev/trust-bundle.pem
           backends:
           - dynamic: {}
 ---
