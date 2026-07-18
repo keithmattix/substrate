@@ -173,7 +173,6 @@ message RestoreWorkloadRequest {
   // What content to restore from the snapshot.
   SnapshotScope scope = 10;
 
-
   // Remote egress gateway selected for this activation. When absent, actor
   // traffic uses direct egress instead of being redirected through atunnel.
   optional string egress_gateway_address = 12;

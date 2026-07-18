@@ -52,17 +52,18 @@ import (
 )
 
 var (
-	podUID                     = flag.String("pod-uid", "", "The UID of the current pod")
+	podUID      = flag.String("pod-uid", "", "The UID of the current pod")
+	chBinary    = flag.String("cloud-hypervisor-binary", "cloud-hypervisor", "Path to the cloud-hypervisor binary (used to relaunch on restore).")
+	kataConfig  = flag.String("kata-config", "", "Path to a kata configuration.toml (passed to the shim as KATA_CONF_FILE). Empty uses kata's default. atelet generates one pointing at runtime-fetched assets.")
+	kataDebug   = flag.Bool("kata-debug", false, "Verbose kata-agent debugging: raise the guest agent log level and forward the guest console (incl. agent logs) into the pod logs.")
+	showVersion = flag.Bool("version", false, "Print version and exit.")
+
 	atunnelListenAddress       = flag.String("atunnel-listen-address", "0.0.0.0:443", "Address for actor ingress HTTPS")
 	atunnelCredentialBundle    = flag.String("atunnel-credential-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "PEM credential bundle for actor ingress HTTPS")
 	atunnelTrustBundle         = flag.String("atunnel-trust-bundle", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "PEM trust bundle for actor ingress clients")
 	atunnelClientIdentity      = flag.String("atunnel-client-identity", "spiffe://cluster.local/ns/ate-system/sa/ateway-ingress", "SPIFFE identity allowed to call actor ingress HTTPS")
 	atunnelEgressListenAddress = flag.String("atunnel-egress-listen-address", "0.0.0.0:15001", "Address for transparently intercepted actor egress TCP")
 	atunnelEgressTrustBundle   = flag.String("atunnel-egress-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "PEM trust bundle for the egress gateway")
-	chBinary                   = flag.String("cloud-hypervisor-binary", "cloud-hypervisor", "Path to the cloud-hypervisor binary (used to relaunch on restore).")
-	kataConfig                 = flag.String("kata-config", "", "Path to a kata configuration.toml (passed to the shim as KATA_CONF_FILE). Empty uses kata's default. atelet generates one pointing at runtime-fetched assets.")
-	kataDebug                  = flag.Bool("kata-debug", false, "Verbose kata-agent debugging: raise the guest agent log level and forward the guest console (incl. agent logs) into the pod logs.")
-	showVersion                = flag.Bool("version", false, "Print version and exit.")
 )
 
 func main() {
@@ -322,6 +323,8 @@ func (s *AteomService) activateActorNetworking(atespace, actorName string, actor
 }
 
 func (s *AteomService) deactivateActorNetworking(ctx context.Context) error {
+	// Stop admitting traffic and drain active streams before the Actor network
+	// is torn down. Attempt both directions even if one fails to deactivate.
 	var err error
 	if s.atunnel != nil {
 		err = errors.Join(err, s.atunnel.Deactivate(ctx))

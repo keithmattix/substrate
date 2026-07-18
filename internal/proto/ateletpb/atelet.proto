@@ -240,7 +240,6 @@ message RestoreRequest {
   // What content to restore from the checkpoint.
   SnapshotScope scope = 11;
 
-
   // Remote egress gateway selected for this activation. When absent, actor
   // traffic uses direct egress instead of being redirected through atunnel.
   optional string egress_gateway_address = 23;

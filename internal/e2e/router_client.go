@@ -198,16 +198,16 @@ func (c *RouterClient) Close() {
 // actor's mesh Host so the router routes (and resumes) it. The caller must close
 // the body.
 func (c *RouterClient) Get(ctx context.Context, atespace, actorName, path string) (*http.Response, error) {
-	return c.request(ctx, http.MethodGet, atespace, actorID, path, nil)
+	return c.request(ctx, http.MethodGet, atespace, actorName, path, nil)
 }
 
 // PostJSON issues a POST with a JSON body to an Actor through the router. The
 // caller must close the response body.
-func (c *RouterClient) PostJSON(ctx context.Context, atespace, actorID, path string, body []byte) (*http.Response, error) {
-	return c.request(ctx, http.MethodPost, atespace, actorID, path, bytes.NewReader(body))
+func (c *RouterClient) PostJSON(ctx context.Context, atespace, actorName, path string, body []byte) (*http.Response, error) {
+	return c.request(ctx, http.MethodPost, atespace, actorName, path, bytes.NewReader(body))
 }
 
-func (c *RouterClient) request(ctx context.Context, method, atespace, actorID, path string, body io.Reader) (*http.Response, error) {
+func (c *RouterClient) request(ctx context.Context, method, atespace, actorName, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err

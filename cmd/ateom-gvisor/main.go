@@ -53,7 +53,8 @@ import (
 )
 
 var (
-	podUID                     = pflag.String("pod-uid", "", "The UID of the current pod")
+	podUID = pflag.String("pod-uid", "", "The UID of the current pod")
+
 	atunnelListenAddress       = pflag.String("atunnel-listen-address", "0.0.0.0:443", "Address for actor ingress HTTPS")
 	atunnelCredentialBundle    = pflag.String("atunnel-credential-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "PEM credential bundle for actor ingress HTTPS")
 	atunnelTrustBundle         = pflag.String("atunnel-trust-bundle", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "PEM trust bundle for actor ingress clients")
@@ -150,46 +151,10 @@ func do(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("while parsing atunnel upstream: %w", err)
 	}
-	atunnelServer, err := atunnel.NewServer(atunnel.Config{
-		CredentialBundlePath: *atunnelCredentialBundle,
-		TrustBundlePath:      *atunnelTrustBundle,
-		AllowedClientID:      *atunnelClientIdentity,
-		Upstream:             upstream,
-	})
+	atunnelServer, atunnelEgress, atunnelEgressPort, err := runAtunnel(ctx, upstream)
 	if err != nil {
-		return fmt.Errorf("while configuring atunnel: %w", err)
+		return err
 	}
-	atunnelListener, err := net.Listen("tcp", *atunnelListenAddress)
-	if err != nil {
-		return fmt.Errorf("while opening atunnel listener: %w", err)
-	}
-	go func() {
-		if err := atunnelServer.Serve(ctx, atunnelListener); err != nil {
-			serverboot.Fatal(ctx, "Failed to serve actor ingress", err)
-		}
-	}()
-	slog.InfoContext(ctx, "atunnel serving", slog.String("address", *atunnelListenAddress))
-
-	atunnelEgress, err := atunnel.NewEgress(atunnel.TCPOriginalDestination)
-	if err != nil {
-		return fmt.Errorf("while configuring atunnel egress: %w", err)
-	}
-	egressListener, err := net.Listen("tcp", *atunnelEgressListenAddress)
-	if err != nil {
-		return fmt.Errorf("while opening atunnel egress listener: %w", err)
-	}
-	egressTCPAddr, ok := egressListener.Addr().(*net.TCPAddr)
-	if !ok || egressTCPAddr.Port < 1 || egressTCPAddr.Port > 65535 {
-		_ = egressListener.Close()
-		return fmt.Errorf("atunnel egress listener has invalid address %q", egressListener.Addr())
-	}
-	atunnelEgressPort := uint16(egressTCPAddr.Port)
-	go func() {
-		if err := atunnelEgress.Serve(ctx, egressListener); err != nil {
-			serverboot.Fatal(ctx, "Failed to serve actor egress", err)
-		}
-	}()
-	slog.InfoContext(ctx, "atunnel egress serving", slog.String("address", *atunnelEgressListenAddress))
 
 	ateomService := NewService(interiorNetNS, actorLogger, atunnelServer, atunnelEgress, atunnelEgressPort, *atunnelCredentialBundle, *atunnelEgressTrustBundle)
 
@@ -206,6 +171,50 @@ func do(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func runAtunnel(ctx context.Context, upstream *url.URL) (*atunnel.Server, *atunnel.Egress, uint16, error) {
+	atunnelServer, err := atunnel.NewServer(atunnel.Config{
+		CredentialBundlePath: *atunnelCredentialBundle,
+		TrustBundlePath:      *atunnelTrustBundle,
+		AllowedClientID:      *atunnelClientIdentity,
+		Upstream:             upstream,
+	})
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("while configuring atunnel: %w", err)
+	}
+	atunnelListener, err := net.Listen("tcp", *atunnelListenAddress)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("while opening atunnel listener: %w", err)
+	}
+	go func() {
+		if err := atunnelServer.Serve(ctx, atunnelListener); err != nil {
+			serverboot.Fatal(ctx, "Failed to serve actor ingress", err)
+		}
+	}()
+	slog.InfoContext(ctx, "atunnel serving", slog.String("address", *atunnelListenAddress))
+
+	atunnelEgress, err := atunnel.NewEgress(atunnel.TCPOriginalDestination)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("while configuring atunnel egress: %w", err)
+	}
+	egressListener, err := net.Listen("tcp", *atunnelEgressListenAddress)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("while opening atunnel egress listener: %w", err)
+	}
+	egressTCPAddr, ok := egressListener.Addr().(*net.TCPAddr)
+	if !ok || egressTCPAddr.Port < 1 || egressTCPAddr.Port > 65535 {
+		_ = egressListener.Close()
+		return nil, nil, 0, fmt.Errorf("atunnel egress listener has invalid address %q", egressListener.Addr())
+	}
+	atunnelEgressPort := uint16(egressTCPAddr.Port)
+	go func() {
+		if err := atunnelEgress.Serve(ctx, egressListener); err != nil {
+			serverboot.Fatal(ctx, "Failed to serve actor egress", err)
+		}
+	}()
+	slog.InfoContext(ctx, "atunnel egress serving", slog.String("address", *atunnelEgressListenAddress))
+	return atunnelServer, atunnelEgress, atunnelEgressPort, nil
 }
 
 // AteomService is a service for shepherding single microvm.
@@ -550,6 +559,8 @@ func (s *AteomService) activateActorNetworking(atespace, actorName string, actor
 }
 
 func (s *AteomService) deactivateActorNetworking(ctx context.Context) error {
+	// Stop admitting traffic and drain active streams before the Actor network
+	// is torn down. Attempt both directions even if one fails to deactivate.
 	var err error
 	if s.atunnel != nil {
 		err = errors.Join(err, s.atunnel.Deactivate(ctx))
