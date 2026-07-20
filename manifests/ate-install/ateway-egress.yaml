@@ -18,44 +18,6 @@ metadata:
   name: ateway-egress
   namespace: ate-system
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ateway-egress
-  namespace: ate-system
-data:
-  config.yaml: |
-    config:
-      tracing: {}
-    frontendPolicies:
-      connect:
-        mode: tunnel
-    gateways:
-      egress:
-        port: 443
-        tls:
-          cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
-          key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
-          root: /run/podidentity.podcert.ate.dev/trust-bundle.pem
-    binds:
-    - port: 80
-      mode: internal
-      listeners:
-      - name: egress-http
-        protocol: HTTP
-        routes:
-        - name: actor-egress-http
-          policies:
-            substrateEgress:
-              host: https://api.ate-system.svc
-              policies:
-                backendTLS:
-                  cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-                  key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-                  root: /run/servicedns.podcert.ate.dev/trust-bundle.pem
-          backends:
-          - dynamic: {}
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -79,9 +41,9 @@ spec:
         - name: net.ipv4.ip_unprivileged_port_start
           value: "0"
       containers:
-      - name: agentgateway
-        # TODO: replace with official image once general direction is approved
-        image: ghcr.io/howardjohn-dev/agentgateway:v0.0.0-substrate.3
+      - name: nginx
+        image: localhost:5001/substrate-nginx:dev
+        imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -89,9 +51,6 @@ spec:
             - ALL
           runAsNonRoot: true
           runAsUser: 65532
-        args:
-        - -f
-        - /etc/agentgateway/config.yaml
         env:
         - name: POD_NAME
           valueFrom:
@@ -113,7 +72,7 @@ spec:
           value: ateway-egress
         ports:
         - name: https
-          containerPort: 443
+          containerPort: 8443
         - name: health
           containerPort: 15021
         readinessProbe:
@@ -130,9 +89,6 @@ spec:
           successThreshold: 1
           timeoutSeconds: 2
         volumeMounts:
-        - name: config
-          mountPath: /etc/agentgateway
-          readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
@@ -140,9 +96,6 @@ spec:
           mountPath: /run/podidentity.podcert.ate.dev
           readOnly: true
       volumes:
-      - name: config
-        configMap:
-          name: ateway-egress
       - name: servicedns
         projected:
           sources:
