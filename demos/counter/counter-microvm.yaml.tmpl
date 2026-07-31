@@ -55,6 +55,9 @@ spec:
   containers:
   - name: counter
     image: ko://github.com/agent-substrate/substrate/demos/counter
+    command:
+    - /ko-app/counter
+    - --extra-port=9090
     readyz:
       httpGet:
         path: /readyz

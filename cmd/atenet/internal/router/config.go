@@ -56,6 +56,8 @@ type routerConfig struct {
 	StatusPort     int
 	HealthInterval time.Duration
 	HttpsPort      int
+	ConectPort     int
+	ConnectTLSPort int
 	EnvoyCertPath  string
 
 	// UpstreamCredentialBundlePath is the router's podidentity credential bundle

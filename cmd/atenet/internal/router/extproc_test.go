@@ -262,6 +262,56 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 	}
 }
 
+// TestExtProcHandlesConnectMethod locks in that a CONNECT request (used for
+// atenet-router's arbitrary-port ingress support -- the target port travels in
+// :authority, e.g. "<actor-dns>:9090") resolves the actor and produces the
+// same "<workerIP>:443" original-dst mutation as an ordinary request. The
+// router only ever dials the worker's atunnel server; picking the actor's
+// arbitrary port from the CONNECT authority is atunnel's job, not
+// handleRequestHeaders', so this method should need no special-casing here.
+func TestExtProcHandlesConnectMethod(t *testing.T) {
+	const testUUID = "123e4567-e89b-12d3-a456-426614174000"
+
+	clientMock := &mockClient{
+		resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+			return &ateapipb.ResumeActorResponse{Actor: &ateapipb.Actor{AteomPodIp: "10.0.0.52"}}, nil
+		},
+	}
+	s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{}, nil, false)
+
+	// CONNECT requests carry no :path; the request-target lives in :authority.
+	reqHeaders := &extprocv3.HttpHeaders{
+		Headers: &corev3.HeaderMap{
+			Headers: []*corev3.HeaderValue{
+				{Key: ":authority", Value: testUUID + ".team-a.actors.resources.substrate.ate.dev:9090"},
+				{Key: ":method", Value: "CONNECT"},
+			},
+		},
+	}
+
+	res, _, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders)
+	if err != nil {
+		t.Fatalf("ext_proc processing error for CONNECT: %v", err)
+	}
+
+	const wantTarget = "10.0.0.52:443"
+	if target != wantTarget {
+		t.Errorf("target = %q, want %q", target, wantTarget)
+	}
+
+	mutation := res.Response.GetHeaderMutation()
+	if len(mutation.GetSetHeaders()) != 1 {
+		t.Fatalf("expected exactly one header option set, found: %v", mutation.GetSetHeaders())
+	}
+	headerOption := mutation.GetSetHeaders()[0]
+	if strings.ToLower(headerOption.Header.Key) != OriginalDstHeader {
+		t.Errorf("invalid resulting dynamic parameter key: %s", headerOption.Header.Key)
+	}
+	if string(headerOption.Header.RawValue) != wantTarget {
+		t.Errorf("invalid destination mapping found: %s, expected: %s", headerOption.Header.RawValue, wantTarget)
+	}
+}
+
 // TestExtProc_ParkingLotFull verifies that when the parking lot is at capacity
 // the request is shed with a 503 before any resume is attempted.
 func TestExtProc_ParkingLotFull(t *testing.T) {

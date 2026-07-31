@@ -44,6 +44,7 @@ spec:
     image: ko://github.com/agent-substrate/substrate/demos/counter
     command:
     - /ko-app/counter
+    - --extra-port=9090
 ${VALIDATE_EXISTING_FILE_PATH_ARG}
     readyz:
       httpGet:

@@ -47,6 +47,8 @@ func NewRouterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.Kubeconfig, "kubeconfig", "", "Absolute path to the kubeconfig configuration file")
 	cmd.Flags().StringVar(&cfg.AteapiAddr, "ateapi-address", "dns:///api.ate-system.svc:443", "gRPC dial target for the cluster ateapi Control instance.")
 	cmd.Flags().IntVar(&cfg.HttpPort, "port-http", 8080, "TCP port for workload traffic entering through the Envoy Router")
+	cmd.Flags().IntVar(&cfg.ConectPort, "port-connect", 8081, "TCP port for CONNECT-tunneled traffic entering through the ate-router Router")
+	cmd.Flags().IntVar(&cfg.ConnectTLSPort, "port-connect-tls", 8443, "TCP port for CONNECT-tunneled traffic entering through the ate-router Router over TLS")
 	cmd.Flags().IntVar(&cfg.XdsPort, "port-xds", 18000, "TCP port listening for the xDS dynamic Envoy connections")
 	cmd.Flags().IntVar(&cfg.ExtprocPort, "port-extproc", 50051, "Listen port for the Envoy dynamic External Processing (ext_proc) server")
 	cmd.Flags().StringVar(&cfg.ExtprocAddr, "extproc-address", "127.0.0.1", "Host IP or address of the Envoy External Processing (ext_proc) server")

@@ -82,6 +82,10 @@ const (
 	OriginalDstClusterName = "actor_original_dst"
 	// OriginalDstHeader carries the resolved worker atunnel address (IP:443).
 	OriginalDstHeader = "x-ate-original-dst"
+
+	wildcardIP         = "0.0.0.0"
+	ConnectUpgradeType = "CONNECT"
+	MainInternalName   = "main_internal"
 )
 
 // defaultExtProcMessageTimeout is Envoy's per-message ext_proc response timeout
@@ -133,8 +137,10 @@ type XdsServer struct {
 
 	mu sync.Mutex
 
-	httpsPort int
-	certPath  string
+	httpsPort      int
+	connectPort    int
+	connectTLSPort int
+	certPath       string
 
 	// Upstream (actor-facing) mTLS. When upstreamCredentialBundlePath is set, the
 	// ORIGINAL_DST actor cluster dials the actor's in-worker atunnel ingress
@@ -195,6 +201,14 @@ func (x *XdsServer) SetConfig(ingressPort int, extprocPort int, extprocAddr stri
 	x.ingressPort = ingressPort
 	x.extprocPort = extprocPort
 	x.extprocAddr = extprocAddr
+}
+
+// TODO: More extensible config setting that doesn't require another lock op
+func (x *XdsServer) SetConnectPorts(connectPort int, connectTLSPort int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.connectPort = connectPort
+	x.connectTLSPort = connectTLSPort
 }
 
 // SetExtProcMessageTimeout sets how long Envoy waits for the router's ext_proc
@@ -692,6 +706,82 @@ func (x *XdsServer) buildRoutes() *routev3.RouteConfiguration {
 	}
 }
 
+func (x *XdsServer) buildConnectTerminateHCM(statPrefix string) *anypb.Any {
+	routerAny, _ := anypb.New(&routerv3.Router{})
+
+	// TODO: Envoy's default access log format is not very useful for CONNECT requests.
+	// Need to customize it to surface useful information
+	accessLogConfig, _ := anypb.New(&streamaccesslogv3.StdoutAccessLog{})
+
+	hcm, _ := anypb.New(&hcmv3.HttpConnectionManager{
+		StatPrefix:        statPrefix,
+		GenerateRequestId: &wrapperspb.BoolValue{Value: true},
+		Tracing:           x.buildTracing(),
+		AccessLog: []*accesslogv3.AccessLog{
+			{
+				Name: "envoy.access_loggers.stdout",
+				ConfigType: &accesslogv3.AccessLog_TypedConfig{
+					TypedConfig: accessLogConfig,
+				},
+			},
+		},
+		RouteSpecifier: &hcmv3.HttpConnectionManager_RouteConfig{
+			RouteConfig: buildConnectRoutes(),
+		},
+		UpgradeConfigs: []*hcmv3.HttpConnectionManager_UpgradeConfig{
+			{
+				UpgradeType: ConnectUpgradeType,
+			},
+		},
+		CodecType: hcmv3.HttpConnectionManager_AUTO,
+		HttpFilters: []*hcmv3.HttpFilter{
+			{
+				Name: "envoy.filters.http.router",
+				ConfigType: &hcmv3.HttpFilter_TypedConfig{
+					TypedConfig: routerAny,
+				},
+			},
+		},
+		Http2ProtocolOptions: &corev3.Http2ProtocolOptions{
+			AllowConnect: true,
+		},
+	})
+
+	return hcm
+}
+
+func buildConnectRoutes() *routev3.RouteConfiguration {
+	return &routev3.RouteConfiguration{
+		Name: "default",
+		VirtualHosts: []*routev3.VirtualHost{
+			{
+				Name:    "default",
+				Domains: []string{"*"},
+				Routes: []*routev3.Route{
+					{
+						Match: &routev3.RouteMatch{
+							PathSpecifier: &routev3.RouteMatch_ConnectMatcher_{},
+						},
+						Action: &routev3.Route_Route{
+							Route: &routev3.RouteAction{
+								UpgradeConfigs: []*routev3.RouteAction_UpgradeConfig{
+									{
+										UpgradeType:   ConnectUpgradeType,
+										ConnectConfig: &routev3.RouteAction_UpgradeConfig_ConnectConfig{},
+									},
+								},
+								ClusterSpecifier: &routev3.RouteAction_Cluster{
+									Cluster: MainInternalName,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func (x *XdsServer) buildHcm(statPrefix string) *anypb.Any {
 	extProcConfig, _ := anypb.New(&extprocv3filter.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
@@ -805,7 +895,7 @@ func (x *XdsServer) buildListener() *listenerv3.Listener {
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
-					Address: "0.0.0.0",
+					Address: wildcardIP,
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: uint32(x.ingressPort),
 					},
@@ -852,7 +942,7 @@ func (x *XdsServer) buildHttpsListener() *listenerv3.Listener {
 		Address: &corev3.Address{
 			Address: &corev3.Address_SocketAddress{
 				SocketAddress: &corev3.SocketAddress{
-					Address: "0.0.0.0",
+					Address: wildcardIP,
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: uint32(x.httpsPort),
 					},
@@ -873,6 +963,36 @@ func (x *XdsServer) buildHttpsListener() *listenerv3.Listener {
 					Name: "envoy.transport_sockets.tls",
 					ConfigType: &corev3.TransportSocket_TypedConfig{
 						TypedConfig: tlsConfigAny,
+					},
+				},
+			},
+		},
+	}
+}
+
+func (x *XdsServer) buildConnectTerminateListener() *listenerv3.Listener {
+	hcm := x.buildHcm("connect_terminate")
+
+	return &listenerv3.Listener{
+		Name: "connect_terminate",
+		Address: &corev3.Address{
+			Address: &corev3.Address_SocketAddress{
+				SocketAddress: &corev3.SocketAddress{
+					Address: wildcardIP,
+					PortSpecifier: &corev3.SocketAddress_PortValue{
+						PortValue: uint32(x.connectPort),
+					},
+				},
+			},
+		},
+		FilterChains: []*listenerv3.FilterChain{
+			{
+				Filters: []*listenerv3.Filter{
+					{
+						Name: "envoy.filters.network.http_connection_manager",
+						ConfigType: &listenerv3.Filter_TypedConfig{
+							TypedConfig: hcm,
+						},
 					},
 				},
 			},

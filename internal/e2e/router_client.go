@@ -15,9 +15,14 @@
 package e2e
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateclient"
@@ -36,6 +41,7 @@ const (
 // actor is resumed). It port-forwards the router Service, mirroring the
 // approach in internal/ateclient.
 type RouterClient struct {
+	addr    string
 	baseURL string
 	http    *http.Client
 	stop    func()
@@ -59,6 +65,7 @@ func NewRouterClient(ctx context.Context) (*RouterClient, error) {
 	}
 
 	return &RouterClient{
+		addr:    fmt.Sprintf("127.0.0.1:%d", localPort),
 		baseURL: fmt.Sprintf("http://127.0.0.1:%d", localPort),
 		http:    &http.Client{Timeout: 30 * time.Second},
 		stop:    stop,
@@ -80,4 +87,60 @@ func (c *RouterClient) Get(ctx context.Context, actorRef resources.ActorRef, pat
 	// The router routes on the Host/:authority, not a header.
 	req.Host = actorRef.DNSName()
 	return c.http.Do(req)
+}
+
+// Connect opens a raw HTTP CONNECT tunnel through the router to port on the
+// actor, mirroring how atenet-router's arbitrary-port ingress support is
+// reached: the target port is carried in the CONNECT request's :authority
+// (actorRef.DNSName():port), not a header. On success the returned net.Conn
+// carries the actor's raw response bytes; the caller must close it.
+func (c *RouterClient) Connect(ctx context.Context, actorRef resources.ActorRef, port int) (net.Conn, error) {
+	destination := fmt.Sprintf("%s:%d", actorRef.DNSName(), port)
+
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", c.addr)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to router: %w", err)
+	}
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Host: destination},
+		Host:   destination,
+	}
+	if err := req.Write(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("writing CONNECT request: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, req)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("reading CONNECT response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		_ = resp.Body.Close()
+		_ = conn.Close()
+		message := strings.TrimSpace(string(body))
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		return nil, fmt.Errorf("router rejected CONNECT to %s with %s: %s", destination, resp.Status, message)
+	}
+
+	return &bufferedConn{Conn: conn, reader: reader}, nil
+}
+
+// bufferedConn serves reads from a bufio.Reader that may already hold bytes
+// buffered past an HTTP response's header boundary, while writes and the
+// remaining net.Conn behavior pass straight through.
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
 }

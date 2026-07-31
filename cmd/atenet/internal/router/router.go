@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -205,6 +206,20 @@ func (s *RouterServer) Run(ctx context.Context) error {
 
 	g, ctx := errgroup.WithContext(ctx)
 
+	xdsSrv := NewXdsServer(s.cfg.XdsPort)
+	xdsSrv.SetConfig(s.cfg.HttpPort, s.cfg.ExtprocPort, s.cfg.ExtprocAddr)
+	xdsSrv.SetConnectPorts(s.cfg.ConectPort, s.cfg.ConnectTLSPort)
+	setOtlpCollector(ctx, xdsSrv, s.cfg.OtlpCollectorAddress)
+
+	xdsSrv.SetExtProcMaxRequests(s.cfg.extProcMaxRequests())
+	if parkCfg.enabled() {
+		// Envoy must keep a parked request open at least as long as the router
+		// will hold it; add a margin so the router surfaces its own 503 first.
+		xdsSrv.SetExtProcMessageTimeout(parkCfg.Budget + 5*time.Second)
+	}
+
+	xdsSrv.SetTlsConfig(s.cfg.HttpsPort, s.cfg.EnvoyCertPath)
+	xdsSrv.SetUpstreamTls(s.cfg.UpstreamCredentialBundlePath, s.cfg.UpstreamTrustBundlePath, s.cfg.UpstreamSpiffePrefix)
 	if s.extprocSrv == nil {
 		routeDuration, err := newRouteDurationHistogram()
 		if err != nil {

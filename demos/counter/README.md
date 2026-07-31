@@ -4,6 +4,11 @@ This directory contains a demo of a stateful counter application running on Agen
 
 It deploys a simple Go HTTP server (`counter.go`) that increments a counter on every request and preserves state across suspends and resumes.
 
+The deployed template also starts the counter with `--extra-port=9090`, a second
+listener that identifies itself in its response (`hello from extra port 9090 on
+pod <ip>`). It exists to exercise routing to a port other than 80, e.g. through
+atenet-router's arbitrary-port ingress support.
+
 ## Prerequisites
 
 - A k8s cluster with Agent Substrate installed (`./hack/install-ate.sh --deploy-ate-system`).

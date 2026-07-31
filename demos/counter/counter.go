@@ -13,7 +13,8 @@
 // limitations under the License.
 
 // Command counter is a simple server that will be used as a worker pod. It listens on ports 80
-// and returns a greeting with the IP of the pod where it is running.
+// and returns a greeting with the IP of the pod where it is running. It can
+// optionally listen on a second, arbitrary port via --extra-port.
 package main
 
 import (
@@ -64,6 +65,7 @@ func main() {
 	fileCounterDirectory := pflag.String("file-counter-directory", "/home/counter", "Directory for file counter")
 	secondFileCounterDirectory := pflag.String("second-file-counter-directory", "", "Directory for a second file counter; empty disables it. Used to exercise an Actor with more than one durable volume")
 	validateExistingFilePath := pflag.String("validate-existing-file-path", "", "Path to existing file to validate reading")
+	extraPort := pflag.Int("extra-port", 0, "Additional port to listen on, identifying itself in responses; 0 disables it. Used to exercise routing to a port other than 80")
 	pflag.Parse()
 	ctx := context.Background()
 
@@ -122,6 +124,28 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	// A second, arbitrary port that identifies itself in its response, so a
+	// test can prove traffic actually reached this port rather than the
+	// primary one. Used to exercise atenet-router routing to a port other
+	// than 80.
+	if *extraPort > 0 {
+		extraMux := http.NewServeMux()
+		extraMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			response := fmt.Sprintf("hello from extra port %d on pod %s\n", *extraPort, getCurrentIP())
+			slog.InfoContext(r.Context(), "Handled extra-port request", slog.String("response", response))
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(response))
+		})
+		go func() {
+			addr := fmt.Sprintf(":%d", *extraPort)
+			slog.InfoContext(ctx, "Starting counter extra-port server", slog.Int("port", *extraPort))
+			if err := http.ListenAndServe(addr, extraMux); err != nil {
+				slog.ErrorContext(ctx, "Error starting extra-port server", slog.Any("err", err))
+				os.Exit(1)
+			}
+		}()
+	}
 
 	// Write some random data to a file in the root filesystem, to test
 	// filesystem checkpoint/restore.
