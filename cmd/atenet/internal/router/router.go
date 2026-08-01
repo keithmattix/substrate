@@ -208,7 +208,7 @@ func (s *RouterServer) Run(ctx context.Context) error {
 
 	xdsSrv := NewXdsServer(s.cfg.XdsPort)
 	xdsSrv.SetConfig(s.cfg.HttpPort, s.cfg.ExtprocPort, s.cfg.ExtprocAddr)
-	xdsSrv.SetConnectPorts(s.cfg.ConectPort, s.cfg.ConnectTLSPort)
+	xdsSrv.SetConnectPorts(s.cfg.ConnectPort, s.cfg.ConnectTLSPort)
 	setOtlpCollector(ctx, xdsSrv, s.cfg.OtlpCollectorAddress)
 
 	xdsSrv.SetExtProcMaxRequests(s.cfg.extProcMaxRequests())

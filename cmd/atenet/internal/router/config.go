@@ -56,7 +56,7 @@ type routerConfig struct {
 	StatusPort     int
 	HealthInterval time.Duration
 	HttpsPort      int
-	ConectPort     int
+	ConnectPort    int
 	ConnectTLSPort int
 	EnvoyCertPath  string
 

@@ -44,6 +44,8 @@ import (
 	extprocv3filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	internalupstreamv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/internal_upstream/v3"
+	rawbufferv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/raw_buffer/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	clustergrpc "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
@@ -53,6 +55,7 @@ import (
 	routegrpc "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
 	secretgrpc "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	metadatav3 "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -81,7 +84,8 @@ const (
 	// active actor.
 	OriginalDstClusterName = "actor_original_dst"
 	// OriginalDstHeader carries the resolved worker atunnel address (IP:443).
-	OriginalDstHeader = "x-ate-original-dst"
+	OriginalDstHeader      = "x-ate-original-dst"
+	OriginalDstMetadataKey = "envoy.filters.listener.original_dst"
 
 	wildcardIP         = "0.0.0.0"
 	ConnectUpgradeType = "CONNECT"
@@ -392,10 +396,17 @@ func (x *XdsServer) UpdateSnapshot() error {
 	x.versionCount++
 	ver := strconv.FormatInt(x.versionCount, 10)
 
+	// connectEnabled is true when either CONNECT listener (plaintext or TLS) is
+	// configured; the main_internal cluster/listener only exist to serve them.
+	connectEnabled := x.connectPort > 0 || x.connectTLSPort > 0
+
 	// Clusters
 	clusters := []types.Resource{
 		x.buildCluster(),
 		x.buildOriginalDstCluster(),
+	}
+	if connectEnabled {
+		clusters = append(clusters, x.buildMainInternalCluster())
 	}
 	if x.otlpHost != "" {
 		clusters = append(clusters, x.buildOtlpCollectorCluster())
@@ -410,9 +421,21 @@ func (x *XdsServer) UpdateSnapshot() error {
 	listeners := []types.Resource{
 		x.buildListener(),
 	}
+	if connectEnabled {
+		listeners = append(listeners, x.buildMainInternalListener())
+	}
+	if x.connectPort > 0 {
+		listeners = append(listeners, x.buildConnectTerminateListener())
+	}
 	var secrets []types.Resource
+	needsCert := x.certPath != "" && (x.httpsPort > 0 || x.connectTLSPort > 0)
 	if x.httpsPort > 0 && x.certPath != "" {
 		listeners = append(listeners, x.buildHttpsListener())
+	}
+	if x.connectTLSPort > 0 && x.certPath != "" {
+		listeners = append(listeners, x.buildConnectTerminateTLSListener())
+	}
+	if needsCert {
 		secrets = append(secrets, x.buildTlsSecret())
 	}
 
@@ -634,6 +657,66 @@ func (x *XdsServer) buildUpstreamTransportSocket() *corev3.TransportSocket {
 	}
 }
 
+func rawBuffer() *corev3.TransportSocket {
+	rawBufferTypedConfig, _ := anypb.New(&rawbufferv3.RawBuffer{})
+	return &corev3.TransportSocket{
+		Name:       "raw_buffer",
+		ConfigType: &corev3.TransportSocket_TypedConfig{TypedConfig: rawBufferTypedConfig},
+	}
+}
+
+// MainInternalCluster is a simple cluster that sends traffic to the main_internal
+// internal listener (used only for CONNECT requests).
+func (x *XdsServer) buildMainInternalCluster() *clusterv3.Cluster {
+	internalTransportSocketTypedConfig, _ := anypb.New(&internalupstreamv3.InternalUpstreamTransport{
+		TransportSocket: rawBuffer(),
+		PassthroughMetadata: []*internalupstreamv3.InternalUpstreamTransport_MetadataValueSource{
+			{
+				Kind: &metadatav3.MetadataKind{
+					Kind: &metadatav3.MetadataKind_Host_{},
+				},
+				Name: OriginalDstMetadataKey,
+			},
+		},
+	})
+	return &clusterv3.Cluster{
+		Name: MainInternalName,
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_STATIC,
+		},
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			ClusterName: MainInternalName,
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{
+					LbEndpoints: []*endpointv3.LbEndpoint{
+						{
+							HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+								Endpoint: &endpointv3.Endpoint{
+									Address: &corev3.Address{
+										Address: &corev3.Address_EnvoyInternalAddress{
+											EnvoyInternalAddress: &corev3.EnvoyInternalAddress{
+												AddressNameSpecifier: &corev3.EnvoyInternalAddress_ServerListenerName{
+													ServerListenerName: MainInternalName,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		TransportSocket: &corev3.TransportSocket{
+			Name: "internal_upstream",
+			ConfigType: &corev3.TransportSocket_TypedConfig{
+				TypedConfig: internalTransportSocketTypedConfig,
+			},
+		},
+	}
+}
+
 // buildOriginalDstCluster dials the exact worker atunnel address supplied by
 // the ext_proc in OriginalDstHeader. Unlike the dynamic_forward_proxy cluster,
 // it does not derive the destination from :authority, so the request keeps the
@@ -695,9 +778,43 @@ func (x *XdsServer) buildRoutes() *routev3.RouteConfiguration {
 								ClusterSpecifier: &routev3.RouteAction_Cluster{
 									Cluster: OriginalDstClusterName,
 								},
+								// This route also serves CONNECT-tunneled traffic re-injected
+								// via main_internal (buildMainInternalListener). Envoy applies
+								// Timeout to the whole tunnel duration for an upgraded/CONNECT
+								// stream, so a long-lived tunnel needs --route-timeout raised
+								// the same way a long LLM turn does; routeIdleTimeout tracks it
+								// so the idle timer doesn't cut the tunnel first.
 								Timeout:     durationpb.New(x.routeTimeout),
 								IdleTimeout: durationpb.New(x.routeIdleTimeout()),
 							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (x *XdsServer) buildMainInternalListener() *listenerv3.Listener {
+	return &listenerv3.Listener{
+		Name: MainInternalName,
+		Address: &corev3.Address{
+			Address: &corev3.Address_EnvoyInternalAddress{
+				EnvoyInternalAddress: &corev3.EnvoyInternalAddress{
+					AddressNameSpecifier: &corev3.EnvoyInternalAddress_ServerListenerName{
+						ServerListenerName: MainInternalName,
+					},
+				},
+			},
+		},
+		FilterChains: []*listenerv3.FilterChain{
+			{
+				Name: "main_internal_filter_chain",
+				Filters: []*listenerv3.Filter{
+					{
+						Name: "envoy.filters.network.http_connection_manager",
+						ConfigType: &listenerv3.Filter_TypedConfig{
+							TypedConfig: x.buildHcm("main_internal"),
 						},
 					},
 				},
@@ -806,6 +923,13 @@ func (x *XdsServer) buildHcm(statPrefix string) *anypb.Any {
 			ResponseBodyMode:    extprocv3filter.ProcessingMode_NONE,
 			RequestTrailerMode:  extprocv3filter.ProcessingMode_SKIP,
 			ResponseTrailerMode: extprocv3filter.ProcessingMode_SKIP,
+		},
+		// Pass the original_dst metadata so the ext_proc server knows the dst port
+		// (used for CONNECT only)
+		MetadataOptions: &extprocv3filter.MetadataOptions{
+			ForwardingNamespaces: &extprocv3filter.MetadataOptions_MetadataNamespaces{
+				Untyped: []string{OriginalDstMetadataKey},
+			},
 		},
 	})
 
@@ -917,9 +1041,11 @@ func (x *XdsServer) buildListener() *listenerv3.Listener {
 	}
 }
 
-func (x *XdsServer) buildHttpsListener() *listenerv3.Listener {
-	hcm := x.buildHcm("ingress_https")
-
+// buildDownstreamTlsTransportSocket returns the downstream TLS transport
+// socket shared by every TLS-terminating listener: it serves the SDS-fetched
+// certificate at HTTPSCertSecretName (see buildTlsSecret), which UpdateSnapshot
+// includes whenever any TLS listener (HTTPS or CONNECT-TLS) is configured.
+func buildDownstreamTlsTransportSocket() *corev3.TransportSocket {
 	tlsConfig := &tlsv3.DownstreamTlsContext{
 		CommonTlsContext: &tlsv3.CommonTlsContext{
 			TlsCertificateSdsSecretConfigs: []*tlsv3.SdsSecretConfig{
@@ -936,6 +1062,16 @@ func (x *XdsServer) buildHttpsListener() *listenerv3.Listener {
 		},
 	}
 	tlsConfigAny, _ := anypb.New(tlsConfig)
+	return &corev3.TransportSocket{
+		Name: "envoy.transport_sockets.tls",
+		ConfigType: &corev3.TransportSocket_TypedConfig{
+			TypedConfig: tlsConfigAny,
+		},
+	}
+}
+
+func (x *XdsServer) buildHttpsListener() *listenerv3.Listener {
+	hcm := x.buildHcm("ingress_https")
 
 	return &listenerv3.Listener{
 		Name: IngressHTTPSListener,
@@ -959,19 +1095,14 @@ func (x *XdsServer) buildHttpsListener() *listenerv3.Listener {
 						},
 					},
 				},
-				TransportSocket: &corev3.TransportSocket{
-					Name: "envoy.transport_sockets.tls",
-					ConfigType: &corev3.TransportSocket_TypedConfig{
-						TypedConfig: tlsConfigAny,
-					},
-				},
+				TransportSocket: buildDownstreamTlsTransportSocket(),
 			},
 		},
 	}
 }
 
 func (x *XdsServer) buildConnectTerminateListener() *listenerv3.Listener {
-	hcm := x.buildHcm("connect_terminate")
+	hcm := x.buildConnectTerminateHCM("connect_terminate")
 
 	return &listenerv3.Listener{
 		Name: "connect_terminate",
@@ -995,6 +1126,40 @@ func (x *XdsServer) buildConnectTerminateListener() *listenerv3.Listener {
 						},
 					},
 				},
+			},
+		},
+	}
+}
+
+// buildConnectTerminateTLSListener is buildConnectTerminateListener's TLS
+// twin: same CONNECT-terminating HCM, but downstream TLS-wrapped like
+// buildHttpsListener, sharing the same SDS-fetched certificate.
+func (x *XdsServer) buildConnectTerminateTLSListener() *listenerv3.Listener {
+	hcm := x.buildConnectTerminateHCM("connect_terminate_tls")
+
+	return &listenerv3.Listener{
+		Name: "connect_terminate_tls",
+		Address: &corev3.Address{
+			Address: &corev3.Address_SocketAddress{
+				SocketAddress: &corev3.SocketAddress{
+					Address: wildcardIP,
+					PortSpecifier: &corev3.SocketAddress_PortValue{
+						PortValue: uint32(x.connectTLSPort),
+					},
+				},
+			},
+		},
+		FilterChains: []*listenerv3.FilterChain{
+			{
+				Filters: []*listenerv3.Filter{
+					{
+						Name: "envoy.filters.network.http_connection_manager",
+						ConfigType: &listenerv3.Filter_TypedConfig{
+							TypedConfig: hcm,
+						},
+					},
+				},
+				TransportSocket: buildDownstreamTlsTransportSocket(),
 			},
 		},
 	}

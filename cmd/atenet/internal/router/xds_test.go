@@ -278,6 +278,105 @@ func TestXdsServer_UpdateSnapshot_HttpsWithoutCertPath(t *testing.T) {
 	}
 }
 
+// TestXdsServer_UpdateSnapshot_ConnectDisabledByDefault locks in that the
+// CONNECT-terminating listeners/cluster are opt-in: with SetConnectPorts never
+// called (both ports default to 0), UpdateSnapshot must produce exactly the
+// same resources as if CONNECT support didn't exist, matching the HTTPS
+// listener's existing httpsPort>0 gating convention.
+func TestXdsServer_UpdateSnapshot_ConnectDisabledByDefault(t *testing.T) {
+	server := NewXdsServer(18000)
+	server.SetConfig(8085, 50053, "127.0.0.1")
+
+	if err := server.UpdateSnapshot(); err != nil {
+		t.Fatalf("UpdateSnapshot failed: %v", err)
+	}
+	res, err := server.snapshot.GetSnapshot(NodeID)
+	if err != nil {
+		t.Fatalf("Failed to get snapshot: %v", err)
+	}
+	snap := res.(*cachev3.Snapshot)
+
+	clustersMap := snap.GetResources(resourcev3.ClusterType)
+	if _, exists := clustersMap[MainInternalName]; exists {
+		t.Errorf("%s cluster must not be built when CONNECT is disabled", MainInternalName)
+	}
+	if len(clustersMap) != 2 {
+		t.Errorf("Expected 2 cluster definitions with CONNECT disabled, got %d", len(clustersMap))
+	}
+
+	listenersMap := snap.GetResources(resourcev3.ListenerType)
+	for _, name := range []string{"connect_terminate", "connect_terminate_tls", MainInternalName} {
+		if _, exists := listenersMap[name]; exists {
+			t.Errorf("listener %q must not be built when CONNECT is disabled", name)
+		}
+	}
+	if len(listenersMap) != 1 {
+		t.Errorf("Expected only the HTTP listener with CONNECT disabled, got %d listeners", len(listenersMap))
+	}
+}
+
+// TestXdsServer_UpdateSnapshot_WithConnect enables both the plaintext and TLS
+// CONNECT listeners and checks the resources they need are wired up,
+// including that the TLS CONNECT listener triggers the shared cert secret
+// even when the ordinary HTTPS listener (httpsPort) is left disabled.
+func TestXdsServer_UpdateSnapshot_WithConnect(t *testing.T) {
+	const certPath = "/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+
+	server := NewXdsServer(18000)
+	server.SetConfig(8085, 50053, "127.0.0.1")
+	server.SetConnectPorts(8081, 8444)
+	// httpsPort left at 0: only the CONNECT-TLS listener wants the cert here.
+	server.SetTlsConfig(0, certPath)
+
+	if err := server.UpdateSnapshot(); err != nil {
+		t.Fatalf("UpdateSnapshot failed: %v", err)
+	}
+	res, err := server.snapshot.GetSnapshot(NodeID)
+	if err != nil {
+		t.Fatalf("Failed to get snapshot: %v", err)
+	}
+	snap := res.(*cachev3.Snapshot)
+	if err := snap.Consistent(); err != nil {
+		t.Fatalf("Integrity check failed on snapshot: %v", err)
+	}
+
+	clustersMap := snap.GetResources(resourcev3.ClusterType)
+	if _, exists := clustersMap[MainInternalName]; !exists {
+		t.Errorf("%s cluster missing with CONNECT enabled", MainInternalName)
+	}
+
+	listenersMap := snap.GetResources(resourcev3.ListenerType)
+	if _, exists := listenersMap[IngressHTTPSListener]; exists {
+		t.Error("plain HTTPS listener must not be built when only httpsPort is left disabled")
+	}
+	if raw, exists := listenersMap["connect_terminate"]; !exists {
+		t.Error("connect_terminate listener missing")
+	} else if sa := raw.(*listenerv3.Listener).GetAddress().GetSocketAddress(); sa.GetPortValue() != 8081 {
+		t.Errorf("Expected connect_terminate port 8081, got %d", sa.GetPortValue())
+	}
+	if raw, exists := listenersMap["connect_terminate_tls"]; !exists {
+		t.Error("connect_terminate_tls listener missing")
+	} else {
+		l := raw.(*listenerv3.Listener)
+		if sa := l.GetAddress().GetSocketAddress(); sa.GetPortValue() != 8444 {
+			t.Errorf("Expected connect_terminate_tls port 8444, got %d", sa.GetPortValue())
+		}
+		ts := l.GetFilterChains()[0].GetTransportSocket()
+		if ts.GetName() != "envoy.transport_sockets.tls" {
+			t.Errorf("Expected connect_terminate_tls to be TLS-wrapped, got transport socket %q", ts.GetName())
+		}
+	}
+	if _, exists := listenersMap[MainInternalName]; !exists {
+		t.Errorf("%s listener missing with CONNECT enabled", MainInternalName)
+	}
+
+	// The TLS CONNECT listener alone must be enough to require the secret.
+	secretsMap := snap.GetResources(resourcev3.SecretType)
+	if _, exists := secretsMap[HTTPSCertSecretName]; !exists {
+		t.Error("cert secret missing even though connect_terminate_tls needs it")
+	}
+}
+
 func TestXdsServer_UpdateSnapshot_NoHttps_NoSecrets(t *testing.T) {
 	server := NewXdsServer(18000)
 	server.SetConfig(8085, 50053, "127.0.0.1")
