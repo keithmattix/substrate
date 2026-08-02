@@ -60,6 +60,13 @@ type routerConfig struct {
 	ConnectTLSPort int
 	EnvoyCertPath  string
 
+	// NetworkExtprocPort is the listen port for the network (L4) External
+	// Processing gRPC server, separate from ExtprocPort's HTTP one: it serves
+	// CONNECT-tunneled TCP traffic reinjected through main_internal, which has
+	// no HTTP semantics for Envoy's HTTP ext_proc filter to hook into. See
+	// NetworkExtProcServer.
+	NetworkExtprocPort int
+
 	// UpstreamCredentialBundlePath is the router's podidentity credential bundle
 	// (cert+key) presented as the client cert when dialing the actor's atunnel
 	// ingress server over mTLS. UpstreamTrustBundlePath is the CA bundle used to
@@ -101,6 +108,12 @@ type routerConfig struct {
 	// excess is fast-path headroom for requests to already-running actors.
 	// 0 derives it from the parking lot — see extProcMaxRequests.
 	ExtProcMaxRequests int
+
+	// ExtProcMaxConnections is the circuit-breaker max_connections Envoy
+	// applies to the network ext_proc cluster (the TCP/CONNECT leg's
+	// counterpart to ExtProcMaxRequests). Non-positive keeps the default —
+	// see SetExtProcMaxConnections.
+	ExtProcMaxConnections int
 
 	// DrainDelay is how long the router serves after SIGTERM before draining,
 	// allowing readiness flip propagation to Service endpoints. DrainTimeout

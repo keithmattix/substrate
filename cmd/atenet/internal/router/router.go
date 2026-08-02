@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -61,13 +60,14 @@ func init() {
 type RouterServer struct {
 	cfg routerConfig
 
-	Cmd        *cobra.Command
-	k8sClient  client.Client
-	clientset  kubernetes.Interface
-	apiClient  ateapipb.ControlClient
-	extprocSrv *ExtProcServer
-	health     *routerHealth
-	atStore    atStore
+	Cmd               *cobra.Command
+	k8sClient         client.Client
+	clientset         kubernetes.Interface
+	apiClient         ateapipb.ControlClient
+	extprocSrv        *ExtProcServer
+	networkExtprocSrv *NetworkExtProcServer
+	health            *routerHealth
+	atStore           atStore
 }
 
 func NewRouterServer(cfg routerConfig) (*RouterServer, error) {
@@ -206,31 +206,26 @@ func (s *RouterServer) Run(ctx context.Context) error {
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	xdsSrv := NewXdsServer(s.cfg.XdsPort)
-	xdsSrv.SetConfig(s.cfg.HttpPort, s.cfg.ExtprocPort, s.cfg.ExtprocAddr)
-	xdsSrv.SetConnectPorts(s.cfg.ConnectPort, s.cfg.ConnectTLSPort)
-	setOtlpCollector(ctx, xdsSrv, s.cfg.OtlpCollectorAddress)
-
-	xdsSrv.SetExtProcMaxRequests(s.cfg.extProcMaxRequests())
-	if parkCfg.enabled() {
-		// Envoy must keep a parked request open at least as long as the router
-		// will hold it; add a margin so the router surfaces its own 503 first.
-		xdsSrv.SetExtProcMessageTimeout(parkCfg.Budget + 5*time.Second)
+	// Both the HTTP and network ext_proc servers park on the same instruments:
+	// OTel instrument identity is keyed by name within a Meter, so a second
+	// newParkingMetrics() call would just create a redundant handle onto the
+	// same series rather than a distinguishable one -- share one instance
+	// instead of pretending otherwise.
+	parkMetrics, err := newParkingMetrics()
+	if err != nil {
+		return fmt.Errorf("failed to create parking metrics: %w", err)
 	}
-
-	xdsSrv.SetTlsConfig(s.cfg.HttpsPort, s.cfg.EnvoyCertPath)
-	xdsSrv.SetUpstreamTls(s.cfg.UpstreamCredentialBundlePath, s.cfg.UpstreamTrustBundlePath, s.cfg.UpstreamSpiffePrefix)
 	if s.extprocSrv == nil {
 		routeDuration, err := newRouteDurationHistogram()
 		if err != nil {
 			return fmt.Errorf("failed to create route-duration histogram: %w", err)
 		}
-		parkMetrics, err := newParkingMetrics()
-		if err != nil {
-			return fmt.Errorf("failed to create parking metrics: %w", err)
-		}
 		s.extprocSrv = NewExtProcServer(s.cfg.ExtprocPort, s.apiClient, routeDuration, parkCfg, parkMetrics, s.cfg.atenetRouter().routeViaAuthority())
 	}
+	if s.networkExtprocSrv == nil {
+		s.networkExtprocSrv = NewNetworkExtProcServer(s.apiClient, parkCfg, parkMetrics)
+	}
+
 	s.health = newRouterHealth(s.cfg.HealthInterval, s.clientset, s.apiClient, s.cfg)
 
 	if err := s.startDataplane(ctx, g, parkCfg, sampling.RootSamplingPercent()); err != nil {
@@ -257,6 +252,18 @@ func (s *RouterServer) Run(ctx context.Context) error {
 
 		// Serve returns nil after Stop/GracefulStop.
 		return extprocGRPC.Serve(lis)
+	})
+
+	// Start network (L4) ExtProc Server
+	g.Go(func() error {
+		slog.InfoContext(ctx, "Starting network ExtProc Server", slog.Int("port", s.cfg.NetworkExtprocPort))
+		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.cfg.NetworkExtprocPort))
+		if err != nil {
+			return fmt.Errorf("failed to listen on network extproc port %d: %w", s.cfg.NetworkExtprocPort, err)
+		}
+		defer lis.Close()
+
+		return s.networkExtprocSrv.Serve(ctx, lis)
 	})
 
 	// Start HTTP status endpoint

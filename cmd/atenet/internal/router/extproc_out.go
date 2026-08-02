@@ -79,6 +79,7 @@ func addRoutingMutations(dst, actorHost string, routeViaAuthority bool, mut *ext
 	}
 }
 
+
 func immediateResponse(statusCode envoy_type.StatusCode, message string) *extproc.ProcessingResponse {
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_ImmediateResponse{

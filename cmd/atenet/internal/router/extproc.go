@@ -33,6 +33,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
@@ -88,7 +89,7 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 		switch reqType := req.Request.(type) {
 		case *extprocv3.ProcessingRequest_RequestHeaders:
 			start := time.Now()
-			hResponse, rqm, target, tmplNs, tmplName, resumeOutcome, err := s.handleRequestHeaders(stream.Context(), reqType.RequestHeaders)
+			hResponse, dynamicMetadata, rqm, target, tmplNs, tmplName, resumeOutcome, err := s.handleRequestHeaders(stream.Context(), reqType.RequestHeaders, req.GetAttributes())
 			elapsed := time.Since(start)
 			outcomeStr := classifyOutcome(err)
 			resumeStr := string(resumeOutcome)
@@ -104,6 +105,7 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 				s.recorder.AddRouterRequest(start, elapsed, "Error", "-", rqm)
 			} else {
 				resp.Response = &extprocv3.ProcessingResponse_RequestHeaders{RequestHeaders: hResponse}
+				resp.DynamicMetadata = dynamicMetadata
 				s.recordRouteDuration(stream.Context(), elapsed, tmplNs, tmplName, outcomeStr, resumeStr)
 				s.recorder.AddRouterRequest(start, elapsed, "Route ok", target, rqm)
 			}
@@ -128,7 +130,8 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 func (s *ExtProcServer) handleRequestHeaders(
 	ctx context.Context,
 	reqHeaders *extprocv3.HttpHeaders,
-) (*extprocv3.HeadersResponse, *requestMetadata, string, string, string, ResumeOutcome, error) {
+	attributes map[string]*structpb.Struct,
+) (*extprocv3.HeadersResponse, *structpb.Struct, *requestMetadata, string, string, string, ResumeOutcome, error) {
 	metadata := newRequestMetadata(reqHeaders.Headers.GetHeaders())
 	slog.InfoContext(ctx, "Request", slog.String("host", metadata.host))
 
@@ -140,10 +143,23 @@ func (s *ExtProcServer) handleRequestHeaders(
 	ctx, span := otel.Tracer(routerServiceName).Start(ctx, "ExtProc.RequestHeaders")
 	defer span.End()
 
-	actorRef, err := parseActorRef(metadata.host)
+	// The actor is always resolved from the forwarded filter-state authority
+	// attribute, never the Host/:authority header directly: that header is only
+	// reliable for the plain ingress_http/ingress_https listeners (which
+	// populate the filter state themselves via authorityFilterStateFilter --
+	// see buildHcm's captureAuthority). For CONNECT-tunneled traffic reinjected
+	// through main_internal, the tunneled protocol's own :authority is
+	// unrelated to the actor's DNS name; the authoritative value is whatever
+	// connect_terminate captured at CONNECT time and shared with upstream via
+	// filter state (see buildMainInternalCluster). Same source
+	// NetworkExtProcServer.handleFirstFrame uses for the TCP leg.
+	authority := attributes[HttpExtProcFilterName].GetFields()[AuthorityFilterStateAttribute].GetStringValue()
+	if authority == "" {
+		return nil, nil, metadata, "", "", "", ResumeOutcomeNone, invalidHostErr(metadata.host, fmt.Errorf("missing %s request attribute", AuthorityFilterStateAttribute))
+	}
+	actorRef, err := parseActorRef(authority)
 	if err != nil {
-		// Host is invalid, respond with 404.
-		return nil, metadata, "", "", "", ResumeOutcomeNone, invalidHostErr(metadata.host, err)
+		return nil, nil, metadata, "", "", "", ResumeOutcomeNone, invalidHostErr(authority, err)
 	}
 
 	// Admit the request to the parking lot before resuming. While resume is
@@ -153,14 +169,14 @@ func (s *ExtProcServer) handleRequestHeaders(
 	// backpressure instead of queueing without bound.
 	release, ok := s.parking.enter(ctx)
 	if !ok {
-		return nil, metadata, "", "", "", ResumeOutcomeNone, parkingFullErr(actorRef.String())
+		return nil, nil, metadata, "", "", "", ResumeOutcomeNone, parkingFullErr(actorRef.String())
 	}
 
 	slog.InfoContext(ctx, "ResumeActor", slog.Any("actor", actorRef))
 	actor, resumeOutcome, err := s.resumer.ResumeActor(ctx, actorRef)
 	release(parkOutcomeFor(err))
 	if err != nil {
-		return nil, metadata, "", "", "", resumeOutcome, mapResumeError(actorRef, err)
+		return nil, nil, metadata, "", "", "", resumeOutcome, mapResumeError(actorRef, err)
 	}
 
 	// Actor template identity, used as low-cardinality route-latency metric
@@ -175,7 +191,7 @@ func (s *ExtProcServer) handleRequestHeaders(
 		slog.String("workerIP", workerIP))
 
 	if ip := net.ParseIP(workerIP); ip == nil {
-		return nil, metadata, "", tmplNs, tmplName, resumeOutcome, newReqError(envoy_type.StatusCode_InternalServerError,
+		return nil, nil, metadata, "", tmplNs, tmplName, resumeOutcome, newReqError(envoy_type.StatusCode_InternalServerError,
 			"actor %s routing failed", actorRef)
 	}
 
@@ -190,6 +206,20 @@ func (s *ExtProcServer) handleRequestHeaders(
 
 	slog.InfoContext(ctx, "Route ok", slog.Any("actor", actorRef), slog.String("targetAddr", targetAddr))
 
+	// Report the resolved worker address as dynamic metadata rather than a
+	// header mutation: a header only works for HTTP traffic, and this same
+	// server may in principle be reused by transports that aren't. See
+	// ActorTargetMetadataNamespace and buildOriginalDstCluster's MetadataKey.
+	dynamicMetadata, err := structpb.NewStruct(map[string]any{
+		ActorTargetMetadataNamespace: map[string]any{
+			OriginalDstHeader: targetAddr,
+		},
+	})
+	if err != nil {
+		return nil, nil, metadata, "", tmplNs, tmplName, resumeOutcome, newReqError(envoy_type.StatusCode_InternalServerError,
+			"actor %s routing failed", actorRef)
+	}
+
 	// Route by telling the ORIGINAL_DST cluster which worker atunnel address to
 	// dial, without touching :authority — atunnel authorizes the actor by the
 	// original Host (actor DNS name).
@@ -200,7 +230,7 @@ func (s *ExtProcServer) handleRequestHeaders(
 		Response: &extprocv3.CommonResponse{
 			HeaderMutation: mutation,
 		},
-	}, metadata, targetAddr, tmplNs, tmplName, resumeOutcome, nil
+	}, dynamicMetadata, metadata, targetAddr, tmplNs, tmplName, resumeOutcome, nil
 }
 
 func (s *ExtProcServer) recordRouteDuration(ctx context.Context, d time.Duration, tmplNs, tmplName, outcome, resume string) {

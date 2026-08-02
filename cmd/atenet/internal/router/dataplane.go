@@ -58,12 +58,14 @@ func (s *RouterServer) startDataplane(ctx context.Context, g *errgroup.Group, pa
 
 func (s *RouterServer) startEnvoyDataplane(ctx context.Context, g *errgroup.Group, parkCfg ParkedRequestConfig, traceRootSamplingPercent float64) {
 	xdsSrv := NewXdsServer(s.cfg.XdsPort)
-	xdsSrv.SetConfig(s.cfg.HttpPort, s.cfg.ExtprocPort, s.cfg.ExtprocAddr)
+	xdsSrv.SetConfig(s.cfg.HttpPort, s.cfg.ExtprocPort, s.cfg.NetworkExtprocPort, s.cfg.ExtprocAddr)
+	xdsSrv.SetConnectPorts(s.cfg.ConnectPort, s.cfg.ConnectTLSPort)
 	setOtlpCollector(ctx, xdsSrv, s.cfg.OtlpCollectorAddress)
 	xdsSrv.SetTraceRootSamplingPercent(traceRootSamplingPercent)
 
 	xdsSrv.SetRouteTimeout(s.cfg.RouteTimeout)
 	xdsSrv.SetExtProcMaxRequests(s.cfg.extProcMaxRequests())
+	xdsSrv.SetExtProcMaxConnections(s.cfg.ExtProcMaxConnections)
 	if parkCfg.enabled() {
 		// Envoy must keep a parked request open at least as long as the router
 		// will hold it; add a margin so the router surfaces its own 503 first.

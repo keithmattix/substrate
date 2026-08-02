@@ -35,7 +35,33 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 )
+
+// authorityAttributes builds the ProcessingRequest.Attributes map ext_proc now
+// resolves the actor from -- the forwarded filter_state['dev.substrate.authority']
+// CEL attribute that buildHcm's RequestAttributes (backed by
+// authorityFilterStateFilter, or for CONNECT, connect_terminate's own capture)
+// requests from Envoy. It replaces the :authority header as the source of
+// routing truth; tests still set the header too, since newRequestMetadata
+// still logs it (see handleRequestHeaders).
+func authorityAttributes(t *testing.T, authority string) map[string]*structpb.Struct {
+	t.Helper()
+	s, err := structpb.NewStruct(map[string]any{AuthorityFilterStateAttribute: authority})
+	if err != nil {
+		t.Fatalf("build authority attributes: %v", err)
+	}
+	return map[string]*structpb.Struct{
+		HttpExtProcFilterName: s,
+	}
+}
+
+// dynamicMetadataTarget extracts the resolved worker address handleRequestHeaders
+// reports via ActorTargetMetadataNamespace/OriginalDstHeader, the metadata
+// equivalent of the header mutation it used to make.
+func dynamicMetadataTarget(dynamicMetadata *structpb.Struct) string {
+	return dynamicMetadata.GetFields()[ActorTargetMetadataNamespace].GetStructValue().GetFields()[OriginalDstHeader].GetStringValue()
+}
 
 type mockClient struct {
 	ateapipb.ControlClient
@@ -73,7 +99,7 @@ func TestHandleRequestHeadersDoesNotLogSensitiveData(t *testing.T) {
 		},
 	}
 
-	_, metadata, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders)
+	_, _, metadata, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, testUUID+".team-a.actors.resources.substrate.ate.dev"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,7 +234,7 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 				},
 			}
 
-			res, metadata, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders)
+			res, dynamicMetadata, metadata, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, tc.authority))
 			if tc.expectErr {
 				if err == nil {
 					t.Fatalf("expected error but got nil")
@@ -251,6 +277,9 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 			if got := gotMutations[strings.ToLower(atunnel.OriginalHostHeader)]; got != tc.authority {
 				t.Errorf("original host mutation = %q, want %q", got, tc.authority)
 			}
+			if got := dynamicMetadataTarget(dynamicMetadata); got != tc.expectedTarget {
+				t.Errorf("invalid destination mapping found: %s, expected: %s", got, tc.expectedTarget)
+			}
 
 			// Confirm that query logs recorded metric trace details
 			s.recorder.AddRouterRequest(time.Now(), 10*time.Millisecond, "Route ok", tc.expectedTarget, metadata)
@@ -289,7 +318,8 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 		},
 	}
 
-	res, _, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders)
+	authority := testUUID + ".team-a.actors.resources.substrate.ate.dev:9090"
+	_, dynamicMetadata, _, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, authority))
 	if err != nil {
 		t.Fatalf("ext_proc processing error for CONNECT: %v", err)
 	}
@@ -298,17 +328,8 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 	if target != wantTarget {
 		t.Errorf("target = %q, want %q", target, wantTarget)
 	}
-
-	mutation := res.Response.GetHeaderMutation()
-	if len(mutation.GetSetHeaders()) != 1 {
-		t.Fatalf("expected exactly one header option set, found: %v", mutation.GetSetHeaders())
-	}
-	headerOption := mutation.GetSetHeaders()[0]
-	if strings.ToLower(headerOption.Header.Key) != OriginalDstHeader {
-		t.Errorf("invalid resulting dynamic parameter key: %s", headerOption.Header.Key)
-	}
-	if string(headerOption.Header.RawValue) != wantTarget {
-		t.Errorf("invalid destination mapping found: %s, expected: %s", headerOption.Header.RawValue, wantTarget)
+	if got := dynamicMetadataTarget(dynamicMetadata); got != wantTarget {
+		t.Errorf("invalid destination mapping found: %s, expected: %s", got, wantTarget)
 	}
 }
 
@@ -342,7 +363,7 @@ func TestExtProc_ParkingLotFull(t *testing.T) {
 		},
 	}
 
-	_, _, _, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders)
+	_, _, _, _, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, testUUID+".team-a.actors.resources.substrate.ate.dev"))
 	if err == nil {
 		t.Fatal("expected error when parking lot is full")
 	}

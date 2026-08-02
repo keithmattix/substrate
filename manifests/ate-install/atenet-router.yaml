@@ -64,6 +64,14 @@ data:
       id: substrate-envoy-node
       cluster: substrate-router-cluster
 
+    # Required for main_internal (see xds.go's buildMainInternalListener):
+    # Envoy rejects any Listener.internal_listener without this registered,
+    # with "InternalListener bootstrap extension is mandatory".
+    bootstrap_extensions:
+    - name: envoy.bootstrap.internal_listener
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.bootstrap.internal_listener.v3.InternalListener
+
     dynamic_resources:
       lds_config:
         resource_api_version: V3
@@ -138,9 +146,15 @@ spec:
         - "--port-xds=18000"
         - "--port-extproc=50051"
         - "--extproc-address=127.0.0.1"
+        - "--port-network-extproc=50052"
         - "--status-port=4040"
         - "--port-https=8443"
         - "--envoy-cert-path=/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+        # CONNECT-tunneled ingress (arbitrary-port support). connect-tls is
+        # 8444, not the port-https default of 8443, since both listeners are
+        # enabled here simultaneously.
+        - "--port-connect=8081"
+        - "--port-connect-tls=8444"
         # Client auth to ateapi (mtls): verify the serving cert against the
         # servicedns trust bundle and present the podidentity client cert.
         - "--ateapi-address=dns:///api.ate-system.svc:443"
@@ -185,6 +199,8 @@ spec:
           containerPort: 18000
         - name: extproc
           containerPort: 50051
+        - name: network-extproc
+          containerPort: 50052
         - name: status
           containerPort: 4040
         - name: metrics
@@ -217,7 +233,7 @@ spec:
         - name: "drain-signal"
           mountPath: "/var/run/atenet"
       - name: envoy
-        image: envoyproxy/envoy:v1.30-latest
+        image: envoyproxy/envoy:v1.37-latest
         command:
         - "/usr/local/bin/envoy"
         - "-c"
@@ -237,6 +253,10 @@ spec:
           containerPort: 8080
         - name: https
           containerPort: 8443
+        - name: connect
+          containerPort: 8081
+        - name: connect-tls
+          containerPort: 8444
         - name: admin
           containerPort: 9901
         volumeMounts:

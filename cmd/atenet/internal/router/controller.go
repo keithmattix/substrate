@@ -43,7 +43,7 @@ func NewController(
 	xdsSrv *XdsServer,
 	extprocSrv *ExtProcServer,
 ) *Controller {
-	xdsSrv.SetConfig(cfg.HttpPort, cfg.ExtprocPort, cfg.ExtprocAddr)
+	xdsSrv.SetConfig(cfg.HttpPort, cfg.ExtprocPort, cfg.NetworkExtprocPort, cfg.ExtprocAddr)
 
 	var store atStore
 	if cfg.TemplatesFile != "" {
