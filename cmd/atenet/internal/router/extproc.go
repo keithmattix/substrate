@@ -222,13 +222,17 @@ func (s *ExtProcServer) handleRequestHeaders(
 
 	slog.InfoContext(ctx, "Route ok", slog.Any("actor", actorRef), slog.String("targetAddr", targetAddr))
 
-	// Report the resolved worker address as dynamic metadata rather than a
-	// header mutation: a header only works for HTTP traffic, and this same
-	// server may in principle be reused by transports that aren't. See
-	// ActorTargetMetadataNamespace and buildOriginalDstCluster's MetadataKey.
+	// Report the resolved worker address and target port as dynamic metadata
+	// rather than a header mutation: a header only works for HTTP traffic,
+	// and this same server may in principle be reused by transports that
+	// aren't. atunnel can't read this metadata directly, so buildRoutes
+	// derives its own copy of targetPort as a real header from
+	// OriginalDstPortKey via a %DYNAMIC_METADATA(...)% format string. See
+	// OriginalDstMetadataKey and buildOriginalDstCluster's MetadataKey.
 	dynamicMetadata, err := structpb.NewStruct(map[string]any{
-		ActorTargetMetadataNamespace: map[string]any{
-			OriginalDstHeader: targetAddr,
+		OriginalDstMetadataKey: map[string]any{
+			OriginalDstAddressKey: targetAddr,
+			OriginalDstPortKey:    strconv.Itoa(targetPort),
 		},
 	})
 	if err != nil {
@@ -243,7 +247,12 @@ func (s *ExtProcServer) handleRequestHeaders(
 	addRoutingMutations(targetAddr, metadata.host, s.routeViaAuthority, mutation)
 	// atunnel picks which port on the actor to reach from this header (the
 	// CONNECT authority's port, or 80 for plain ingress -- see targetPort
-	// above); it can't read Envoy's dynamic metadata directly.
+	// above). For envoy mode this duplicates what buildRoutes derives
+	// declaratively from OriginalDstPortKey via %DYNAMIC_METADATA(...)% (see
+	// xds.go) -- harmless, since both compute the same value, and the route's
+	// OVERWRITE_IF_EXISTS_OR_ADD wins last. Agentgateway has no equivalent of
+	// that route-level mechanism, so it depends on this header mutation being
+	// set directly.
 	mutation.SetHeaders = append(mutation.SetHeaders, &corev3.HeaderValueOption{
 		Header: &corev3.HeaderValue{
 			Key:      atunnel.TargetPortHeader,

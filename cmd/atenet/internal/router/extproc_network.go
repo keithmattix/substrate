@@ -37,18 +37,14 @@ import (
 // which actor/atespace a raw TCP connection is addressed to.
 const substrateAuthorityMetadataKey = "authority"
 
-// networkOriginalDstMetadataField is the field this server nests under
-// ActorTargetMetadataNamespace in its ProcessingResponse's DynamicMetadata
-// once an actor is resumed, carrying the resolved worker atunnel address.
 // Envoy's network ext_proc filter only ingests DynamicMetadata fields whose
 // top-level key is allowlisted via MetadataOptions.ReceivingNamespaces (see
 // buildTcpConnectFilterChain), merging that field's own (nested) value into
 // the connection's dynamic metadata under the same key; the tcp_proxy leg's
-// cluster needs an OriginalDstLbConfig.MetadataKey pointed at that namespace
-// and this field name to pick it up -- the TCP equivalent of OriginalDstHeader
-// on the HTTP leg. Requires Envoy >= envoyproxy/envoy@b27925c960 (first
-// released in 1.39) for the ReceivingNamespaces field to exist at all.
-const networkOriginalDstMetadataField = OriginalDstHeader
+// cluster needs an OriginalDstLbConfig.MetadataKey pointed at
+// OriginalDstMetadataKey/OriginalDstAddressKey to pick it up. Requires Envoy
+// >= envoyproxy/envoy@b27925c960 (first released in 1.39) for the
+// ReceivingNamespaces field to exist at all.
 
 // NetworkExtProcServer implements Envoy's network (L4) external processing
 // gRPC server for CONNECT-tunneled TCP traffic reinjected through
@@ -178,8 +174,8 @@ func (s *NetworkExtProcServer) handleFirstFrame(ctx context.Context, req *networ
 	slog.InfoContext(ctx, "Route ok", slog.Any("actor", actorRef), slog.String("targetAddr", targetAddr))
 
 	dynamicMetadata, err := structpb.NewStruct(map[string]any{
-		ActorTargetMetadataNamespace: map[string]any{
-			networkOriginalDstMetadataField: targetAddr,
+		OriginalDstMetadataKey: map[string]any{
+			OriginalDstAddressKey: targetAddr,
 		},
 	})
 	if err != nil {

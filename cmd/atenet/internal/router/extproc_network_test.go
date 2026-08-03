@@ -27,10 +27,10 @@ import (
 
 // TestNetworkExtProcHandleFirstFrameNestsMetadata locks in that
 // handleFirstFrame's resolved worker address is nested under
-// ActorTargetMetadataNamespace, matching MetadataOptions.ReceivingNamespaces
-// in buildTcpConnectFilterChain -- Envoy's network ext_proc filter only
-// ingests DynamicMetadata fields whose top-level key is on that allowlist,
-// silently dropping anything else (see xds.go's ReceivingNamespaces comment).
+// OriginalDstMetadataKey, matching MetadataOptions.ReceivingNamespaces in
+// buildTcpConnectFilterChain -- Envoy's network ext_proc filter only ingests
+// DynamicMetadata fields whose top-level key is on that allowlist, silently
+// dropping anything else (see xds.go's ReceivingNamespaces comment).
 func TestNetworkExtProcHandleFirstFrameNestsMetadata(t *testing.T) {
 	const testUUID = "123e4567-e89b-12d3-a456-426614174000"
 	clientMock := &mockClient{
@@ -60,11 +60,11 @@ func TestNetworkExtProcHandleFirstFrameNestsMetadata(t *testing.T) {
 	}
 
 	const wantTarget = "10.0.0.52:443"
-	got := resp.GetDynamicMetadata().GetFields()[ActorTargetMetadataNamespace].GetStructValue().GetFields()[networkOriginalDstMetadataField].GetStringValue()
+	got := resp.GetDynamicMetadata().GetFields()[OriginalDstMetadataKey].GetStructValue().GetFields()[OriginalDstAddressKey].GetStringValue()
 	if got != wantTarget {
-		t.Errorf("dynamic metadata %s/%s = %q, want %q", ActorTargetMetadataNamespace, networkOriginalDstMetadataField, got, wantTarget)
+		t.Errorf("dynamic metadata %s/%s = %q, want %q", OriginalDstMetadataKey, OriginalDstAddressKey, got, wantTarget)
 	}
-	if flat := resp.GetDynamicMetadata().GetFields()[networkOriginalDstMetadataField].GetStringValue(); flat != "" {
-		t.Errorf("dynamic metadata unexpectedly set %s at the top level (%q): Envoy's ReceivingNamespaces allowlist only ingests %s", networkOriginalDstMetadataField, flat, ActorTargetMetadataNamespace)
+	if flat := resp.GetDynamicMetadata().GetFields()[OriginalDstAddressKey].GetStringValue(); flat != "" {
+		t.Errorf("dynamic metadata unexpectedly set %s at the top level (%q): Envoy's ReceivingNamespaces allowlist only ingests %s", OriginalDstAddressKey, flat, OriginalDstMetadataKey)
 	}
 }

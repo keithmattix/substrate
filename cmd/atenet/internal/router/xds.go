@@ -33,6 +33,8 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"github.com/agent-substrate/substrate/internal/atunnel"
+
 	xdsv3 "github.com/cncf/xds/go/xds/core/v3"
 	v3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
@@ -95,32 +97,62 @@ const (
 	// in dynamic metadata, while the request :authority stays the actor DNS
 	// name so atunnel can identify the active actor.
 	OriginalDstClusterName = "actor_original_dst"
-	// OriginalDstHeader is the field key, within ActorTargetMetadataNamespace,
-	// carrying the resolved worker atunnel address (IP:443). Despite the name
-	// it is no longer an HTTP header: a header mutation only works for HTTP
-	// traffic, and the network (TCP) ext_proc leg has no HTTP headers at all,
-	// so both legs report the resolved address as dynamic metadata instead
-	// (see ActorTargetMetadataNamespace and OriginalDstClusterName's
-	// MetadataKey). The name is kept to avoid a second round of renames
-	// across the router/atunnel boundary while that migration settles.
+	// OriginalDstHeader is the literal HTTP header addOriginalDstMutation sets
+	// for router dataplanes that read routing information from headers rather
+	// than Envoy dynamic metadata (agentgateway's static dynamic backend --
+	// see routeViaAuthority). Unrelated to OriginalDstAddressKey below despite
+	// historically sharing a value: one is a wire-format header for a
+	// different dataplane, the other is an Envoy-internal metadata field name.
 	OriginalDstHeader = "x-ate-original-dst"
-	// ActorTargetMetadataNamespace is the dynamic-metadata namespace both the
-	// HTTP and network ext_proc servers write the resolved worker address
-	// into (as OriginalDstHeader), and the one namespace OriginalDstClusterName's
+
+	// OriginalDstMetadataKey is the dynamic-metadata namespace both the HTTP
+	// and network ext_proc servers write the resolved worker address and
+	// target port into, and the one namespace OriginalDstClusterName's
 	// MetadataKey reads from -- Envoy checks request-scoped metadata first,
 	// then connection-scoped, so one namespace name serves the HTTP ext_proc's
 	// per-request metadata and the network ext_proc's per-connection metadata
-	// alike.
+	// alike. Reuses Envoy's own envoy.filters.listener.original_dst listener
+	// filter's namespace instead of inventing one.
 	//
-	// This must equal the network ext_proc filter's own registered Name:
-	// unlike the HTTP ext_proc filter (which exposes MetadataOptions.ReceivingNamespaces
-	// to pick an explicit namespace), the network filter has no such control,
-	// so its ProcessingResponse.DynamicMetadata is assumed to merge under its
-	// own filter name by Envoy's default convention. The HTTP leg has to match
-	// that same string via an explicit ReceivingNamespaces + nested struct
-	// (see buildHcm) for one MetadataKey to resolve both legs.
-	ActorTargetMetadataNamespace = "envoy.filters.network.ext_proc"
-	OriginalDstMetadataKey       = "envoy.filters.listener.original_dst"
+	// That listener filter (already present in ListenerFilters below) reads
+	// this same namespace itself, in its one-shot onAccept() -- for a real IP
+	// socket it restores the connection's address via syscall (no metadata
+	// involved), and for an EnvoyInternal socket it reads OriginalDstAddressKey
+	// as a last-resort fallback before either ext_proc server has run. This
+	// does not collide with our own use of the namespace: the ORIGINAL_DST
+	// cluster's chooseHost() (original_dst_cluster.cc) checks, in order,
+	// filter-state override, then this MetadataKey override, then the
+	// restored-address fallback -- our MetadataKey override always wins once
+	// ext_proc writes it, regardless of what the listener filter found (or
+	// didn't) at accept time, since that's a strictly earlier, independent
+	// code path invoked only as the last-resort case.
+	//
+	// The HTTP ext_proc filter must explicitly opt in via
+	// MetadataOptions.ReceivingNamespaces (see buildHcm) for a response's
+	// DynamicMetadata to land here; the network ext_proc filter's equivalent
+	// (see buildTcpConnectFilterChain) requires Envoy >=
+	// envoyproxy/envoy@b27925c960 (first released in 1.39).
+	OriginalDstMetadataKey = "envoy.filters.listener.original_dst"
+	// OriginalDstAddressKey is the field within OriginalDstMetadataKey
+	// carrying the resolved worker atunnel address (IP:443) -- read by
+	// OriginalDstClusterName's MetadataKey. Reuses the same field name
+	// (rather than "address") that the envoy.filters.listener.original_dst
+	// listener filter itself reads for its own, unrelated EnvoyInternal
+	// fallback path (see OriginalDstMetadataKey).
+	OriginalDstAddressKey = "local"
+	// OriginalDstPortKey is the field within OriginalDstMetadataKey carrying
+	// the actor's target port (the CONNECT authority's port, or 80 for plain
+	// ingress -- see handleRequestHeaders). atunnel can't read Envoy's dynamic
+	// metadata directly, so for envoy mode buildRoutes derives a real
+	// atunnel.TargetPortHeader header for it from this field via a
+	// %DYNAMIC_METADATA(...)% format string; handleRequestHeaders also sets
+	// that same header directly (redundant for envoy, but agentgateway mode
+	// has no equivalent route-level mechanism and depends on it).
+	OriginalDstPortKey = "port"
+	// dynamicMetadataPortFormat is the %DYNAMIC_METADATA(...)% header-value
+	// command operator (see buildRoutes) that derives atunnel.TargetPortHeader
+	// from OriginalDstMetadataKey/OriginalDstPortKey.
+	dynamicMetadataPortFormat = "%DYNAMIC_METADATA(" + OriginalDstMetadataKey + ":" + OriginalDstPortKey + ")%"
 
 	WildcardIP         = "0.0.0.0"
 	ConnectUpgradeType = "CONNECT"
@@ -891,7 +923,7 @@ func (x *XdsServer) buildMainInternalCluster() *clusterv3.Cluster {
 }
 
 // buildOriginalDstCluster dials the exact worker atunnel address supplied by
-// either ext_proc server in dynamic metadata (see ActorTargetMetadataNamespace).
+// either ext_proc server in dynamic metadata (see OriginalDstMetadataKey).
 // A header mutation only works for HTTP traffic, and the network (TCP) ext_proc
 // leg has no HTTP headers at all, so metadata is the one mechanism that serves
 // both. It does not derive the destination from :authority, so the request
@@ -913,9 +945,9 @@ func (x *XdsServer) buildOriginalDstCluster() *clusterv3.Cluster {
 				// one MetadataKey serves both without knowing which leg served
 				// this particular connection.
 				MetadataKey: &metadatav3.MetadataKey{
-					Key: ActorTargetMetadataNamespace,
+					Key: OriginalDstMetadataKey,
 					Path: []*metadatav3.MetadataKey_PathSegment{
-						{Segment: &metadatav3.MetadataKey_PathSegment_Key{Key: OriginalDstHeader}},
+						{Segment: &metadatav3.MetadataKey_PathSegment_Key{Key: OriginalDstAddressKey}},
 					},
 				},
 			},
@@ -970,6 +1002,21 @@ func (x *XdsServer) buildRoutes() *routev3.RouteConfiguration {
 								// so the idle timer doesn't cut the tunnel first.
 								Timeout:     durationpb.New(x.routeTimeout),
 								IdleTimeout: durationpb.New(x.routeIdleTimeout()),
+							},
+						},
+						// atunnel can't read Envoy's dynamic metadata directly, so
+						// this derives its one real header dependency (which port
+						// to reach on the actor) straight from the same metadata
+						// ext_proc already wrote for OriginalDstClusterName's
+						// MetadataKey (see OriginalDstPortKey), rather than
+						// ext_proc building the header mutation itself.
+						RequestHeadersToAdd: []*corev3.HeaderValueOption{
+							{
+								Header: &corev3.HeaderValue{
+									Key:   atunnel.TargetPortHeader,
+									Value: dynamicMetadataPortFormat,
+								},
+								AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 							},
 						},
 					},
@@ -1266,7 +1313,7 @@ func (x *XdsServer) buildTcpConnectFilterChain(statPrefix string) *listenerv3.Fi
 							// earlier versions silently drop
 							// ProcessingResponse.DynamicMetadata for this filter.
 							ReceivingNamespaces: &networkextprocv3.MetadataOptions_MetadataNamespaces{
-								Untyped: []string{ActorTargetMetadataNamespace},
+								Untyped: []string{OriginalDstMetadataKey},
 							},
 						},
 					}),
@@ -1345,8 +1392,8 @@ func (x *XdsServer) buildHcm(statPrefix string, captureAuthority bool) *anypb.An
 		// AuthorityFilterStateKey filter state -- see authorityFilterStateFilter
 		// and handleRequestHeaders) since the actor cannot always be resolved
 		// from the Host header, and the original_dst metadata so the response
-		// can write the resolved worker address back into
-		// ActorTargetMetadataNamespace -- the metadata equivalent of the header
+		// can write the resolved worker address and target port back into
+		// OriginalDstMetadataKey -- the metadata equivalent of the header
 		// mutation this filter used to make.
 		RequestAttributes: []string{AuthorityFilterStateAttribute},
 		MetadataOptions: &extprocv3filter.MetadataOptions{
@@ -1354,7 +1401,7 @@ func (x *XdsServer) buildHcm(statPrefix string, captureAuthority bool) *anypb.An
 				Untyped: []string{OriginalDstMetadataKey},
 			},
 			ReceivingNamespaces: &extprocv3filter.MetadataOptions_MetadataNamespaces{
-				Untyped: []string{ActorTargetMetadataNamespace},
+				Untyped: []string{OriginalDstMetadataKey},
 			},
 		},
 	})

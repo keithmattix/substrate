@@ -57,27 +57,19 @@ func authorityAttributes(t *testing.T, authority string) map[string]*structpb.St
 }
 
 // dynamicMetadataTarget extracts the resolved worker address handleRequestHeaders
-// reports via ActorTargetMetadataNamespace/OriginalDstHeader, the metadata
+// reports via OriginalDstMetadataKey/OriginalDstAddressKey, the metadata
 // equivalent of the header mutation it used to make.
 func dynamicMetadataTarget(dynamicMetadata *structpb.Struct) string {
-	return dynamicMetadata.GetFields()[ActorTargetMetadataNamespace].GetStructValue().GetFields()[OriginalDstHeader].GetStringValue()
+	return dynamicMetadata.GetFields()[OriginalDstMetadataKey].GetStructValue().GetFields()[OriginalDstAddressKey].GetStringValue()
 }
 
-// targetPortHeaderValue extracts the atunnel.TargetPortHeader value
-// handleRequestHeaders sets so atunnel's Server knows which port on the
-// actor to forward to (see server.go's Rewrite func).
-func targetPortHeaderValue(res *extprocv3.HeadersResponse) (string, bool) {
-	for _, h := range res.GetResponse().GetHeaderMutation().GetSetHeaders() {
-		if !strings.EqualFold(h.GetHeader().GetKey(), atunnel.TargetPortHeader) {
-			continue
-		}
-		v := h.GetHeader().GetValue()
-		if v == "" && len(h.GetHeader().GetRawValue()) > 0 {
-			v = string(h.GetHeader().GetRawValue())
-		}
-		return v, true
-	}
-	return "", false
+// dynamicMetadataPort extracts the target port handleRequestHeaders reports
+// via OriginalDstMetadataKey/OriginalDstPortKey. buildRoutes derives a real
+// atunnel.TargetPortHeader from this at the route level via a
+// %DYNAMIC_METADATA(...)% format string; handleRequestHeaders itself sets no
+// header mutation for it.
+func dynamicMetadataPort(dynamicMetadata *structpb.Struct) string {
+	return dynamicMetadata.GetFields()[OriginalDstMetadataKey].GetStructValue().GetFields()[OriginalDstPortKey].GetStringValue()
 }
 
 type mockClient struct {
@@ -299,8 +291,8 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 			if got := dynamicMetadataTarget(dynamicMetadata); got != tc.expectedTarget {
 				t.Errorf("invalid destination mapping found: %s, expected: %s", got, tc.expectedTarget)
 			}
-			if got, ok := targetPortHeaderValue(res); !ok || got != tc.expectedTargetPort {
-				t.Errorf("%s = %q (present: %v), want %q", atunnel.TargetPortHeader, got, ok, tc.expectedTargetPort)
+			if got := dynamicMetadataPort(dynamicMetadata); got != tc.expectedTargetPort {
+				t.Errorf("dynamic metadata port = %q, want %q", got, tc.expectedTargetPort)
 			}
 
 			// Confirm that query logs recorded metric trace details
@@ -317,9 +309,9 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 // atenet-router's arbitrary-port ingress support -- the target port travels in
 // :authority, e.g. "<actor-dns>:9090") resolves the actor, produces the same
 // "<workerIP>:443" original-dst mutation as an ordinary request (the router
-// only ever dials the worker's atunnel server), and forwards the arbitrary
-// port itself via atunnel.TargetPortHeader so atunnel knows which port on the
-// actor to reach.
+// only ever dials the worker's atunnel server), and reports the arbitrary
+// port itself via OriginalDstMetadataKey/OriginalDstPortKey, which buildRoutes
+// turns into atunnel.TargetPortHeader for atunnel.
 func TestExtProcHandlesConnectMethod(t *testing.T) {
 	const testUUID = "123e4567-e89b-12d3-a456-426614174000"
 
@@ -341,7 +333,7 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 	}
 
 	authority := testUUID + ".team-a.actors.resources.substrate.ate.dev:9090"
-	res, dynamicMetadata, _, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, authority))
+	_, dynamicMetadata, _, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, authority))
 	if err != nil {
 		t.Fatalf("ext_proc processing error for CONNECT: %v", err)
 	}
@@ -353,8 +345,8 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 	if got := dynamicMetadataTarget(dynamicMetadata); got != wantTarget {
 		t.Errorf("invalid destination mapping found: %s, expected: %s", got, wantTarget)
 	}
-	if got, ok := targetPortHeaderValue(res); !ok || got != "9090" {
-		t.Errorf("%s = %q (present: %v), want %q", atunnel.TargetPortHeader, got, ok, "9090")
+	if got := dynamicMetadataPort(dynamicMetadata); got != "9090" {
+		t.Errorf("dynamic metadata port = %q, want %q", got, "9090")
 	}
 }
 

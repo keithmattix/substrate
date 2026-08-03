@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/agent-substrate/substrate/internal/atunnel"
 	v3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -862,7 +863,7 @@ func TestXdsServer_BuildTcpConnectFilterChain(t *testing.T) {
 	if got := cfg.GetProcessingMode().GetProcessWrite(); got != networkextprocv3.ProcessingMode_SKIP {
 		t.Errorf("Expected ProcessWrite SKIP, got %s", got)
 	}
-	if got, want := cfg.GetMetadataOptions().GetReceivingNamespaces().GetUntyped(), []string{ActorTargetMetadataNamespace}; !slices.Equal(got, want) {
+	if got, want := cfg.GetMetadataOptions().GetReceivingNamespaces().GetUntyped(), []string{OriginalDstMetadataKey}; !slices.Equal(got, want) {
 		t.Errorf("Expected ReceivingNamespaces.Untyped %v, got %v -- without this, Envoy silently drops handleFirstFrame's resolved worker address instead of merging it into connection metadata", want, got)
 	}
 
@@ -956,7 +957,7 @@ func TestXdsServer_BuildMainInternalListener_FilterChainMatcherKeysOnTransportPr
 // TestXdsServer_BuildOriginalDstCluster_UsesMetadataKey covers the fix for a
 // header-mutation-only LB config: a header only works for HTTP traffic, so
 // the ORIGINAL_DST cluster must resolve its destination from
-// ActorTargetMetadataNamespace/OriginalDstHeader dynamic metadata instead --
+// OriginalDstMetadataKey/OriginalDstAddressKey dynamic metadata instead --
 // the one mechanism both the HTTP and network ext_proc legs can report
 // through (see buildOriginalDstCluster, handleRequestHeaders, and
 // NetworkExtProcServer.handleFirstFrame).
@@ -967,12 +968,40 @@ func TestXdsServer_BuildOriginalDstCluster_UsesMetadataKey(t *testing.T) {
 		t.Error("UseHttpHeader must not be set: it only applies to HTTP traffic, and the network ext_proc leg has none")
 	}
 	key := lbConfig.GetMetadataKey()
-	if key.GetKey() != ActorTargetMetadataNamespace {
-		t.Errorf("Expected MetadataKey.Key %q, got %q", ActorTargetMetadataNamespace, key.GetKey())
+	if key.GetKey() != OriginalDstMetadataKey {
+		t.Errorf("Expected MetadataKey.Key %q, got %q", OriginalDstMetadataKey, key.GetKey())
 	}
 	path := key.GetPath()
-	if len(path) != 1 || path[0].GetKey() != OriginalDstHeader {
-		t.Errorf("Expected MetadataKey.Path [%q], got %v", OriginalDstHeader, path)
+	if len(path) != 1 || path[0].GetKey() != OriginalDstAddressKey {
+		t.Errorf("Expected MetadataKey.Path [%q], got %v", OriginalDstAddressKey, path)
+	}
+}
+
+// TestXdsServer_BuildRoutes_DerivesTargetPortHeader covers the fix for atunnel
+// needing the target port as a real header (it can't read Envoy's dynamic
+// metadata directly): rather than ext_proc building that header mutation
+// itself, the route derives it declaratively from the same
+// OriginalDstMetadataKey/OriginalDstPortKey metadata ext_proc already writes
+// for the cluster's own MetadataKey, via a %DYNAMIC_METADATA(...)% command
+// operator.
+func TestXdsServer_BuildRoutes_DerivesTargetPortHeader(t *testing.T) {
+	x := NewXdsServer(18000)
+	route := x.buildRoutes().GetVirtualHosts()[0].GetRoutes()[0]
+
+	headers := route.GetRequestHeadersToAdd()
+	if len(headers) != 1 {
+		t.Fatalf("Expected exactly 1 request header to add, got %d: %v", len(headers), headers)
+	}
+	h := headers[0]
+	if got, want := h.GetHeader().GetKey(), atunnel.TargetPortHeader; got != want {
+		t.Errorf("Expected header key %q, got %q", want, got)
+	}
+	wantValue := "%DYNAMIC_METADATA(" + OriginalDstMetadataKey + ":" + OriginalDstPortKey + ")%"
+	if got := h.GetHeader().GetValue(); got != wantValue {
+		t.Errorf("Expected header value %q, got %q", wantValue, got)
+	}
+	if got, want := h.GetAppendAction(), corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD; got != want {
+		t.Errorf("Expected append action %s, got %s", want, got)
 	}
 }
 
