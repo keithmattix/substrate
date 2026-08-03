@@ -6,7 +6,7 @@ It deploys a simple Go HTTP server (`counter.go`) that increments a counter on e
 
 The deployed template also starts the counter with `--extra-port=9090`, a second
 listener that identifies itself in its response (`hello from extra port 9090 on
-pod <ip>`). It exists to exercise routing to a port other than 80, e.g. through
+pod <ip>`). It exists to exercise routing to a port other than 80 through
 atenet-router's arbitrary-port ingress support.
 
 ## Prerequisites
@@ -88,6 +88,30 @@ kubectl ate suspend actor my-counter-1 -a demo
 kubectl ate delete actor my-counter-1 -a demo
 kubectl ate delete atespace demo
 ```
+
+### Reaching the extra port (arbitrary-port ingress)
+
+atenet-router can reach a port other than an actor's primary one (80) through
+an HTTP CONNECT tunnel whose `:authority` carries the target port
+(`<actor-dns-name>:<port>`). This is supported for HTTP/1.1 and h2c payloads
+tunneled over CONNECT, whether the CONNECT itself is plaintext or TLS-wrapped.
+
+Port-forward the router's dedicated CONNECT port (separate from the plain
+ingress port used above):
+
+```bash
+kubectl port-forward -n ate-system svc/atenet-router 8001:8081
+```
+
+Then reach the counter's extra port (9090) through the tunnel:
+
+```bash
+curl --proxytunnel -x http://localhost:8001 \
+  http://my-counter-1.demo.actors.resources.substrate.ate.dev:9090/
+```
+
+This prints `hello from extra port 9090 on pod <ip>`, proving the tunnel
+reached the extra listener rather than the primary one.
 
 ## Micro-VM variant
 

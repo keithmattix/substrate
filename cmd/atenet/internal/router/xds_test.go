@@ -1005,6 +1005,22 @@ func TestXdsServer_BuildRoutes_DerivesTargetPortHeader(t *testing.T) {
 	}
 }
 
+// TestBuildConnectRoutes_DisablesTimeout covers a real bug: unlike a
+// WebSocket upgrade, Envoy never disables a route's timeout once a CONNECT
+// tunnel is established, so an unset Timeout here would fall back to Envoy's
+// global default of 15s and silently kill every CONNECT tunnel through this
+// router after 15 seconds regardless of activity.
+func TestBuildConnectRoutes_DisablesTimeout(t *testing.T) {
+	route := buildConnectRoutes().GetVirtualHosts()[0].GetRoutes()[0]
+	timeout := route.GetRoute().GetTimeout()
+	if timeout == nil {
+		t.Fatal("Expected an explicit Timeout, got nil (falls back to Envoy's 15s default)")
+	}
+	if timeout.AsDuration() != 0 {
+		t.Errorf("Expected Timeout 0 (disabled), got %s", timeout.AsDuration())
+	}
+}
+
 func TestXdsServer_SetOtlpCollector(t *testing.T) {
 	// --otlp-collector-address defaults to OTEL_EXPORTER_OTLP_ENDPOINT, so the
 	// URL forms that variable carries have to reduce to the bare host and port

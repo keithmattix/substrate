@@ -41,14 +41,19 @@ const (
 // actor is resumed). It port-forwards the router Service, mirroring the
 // approach in internal/ateclient.
 type RouterClient struct {
-	addr    string
-	baseURL string
-	http    *http.Client
-	stop    func()
+	addr        string
+	baseURL     string
+	connectAddr string
+	http        *http.Client
+	stop        func()
+	stopConnect func()
 }
 
-// NewRouterClient establishes a port-forward to the atenet router. Call Close
-// to tear it down.
+// NewRouterClient establishes port-forwards to the atenet router's plain HTTP
+// port and its CONNECT port (see Connect -- CONNECT is only enabled on the
+// connect_terminate listener, a separate port from plain ingress; see
+// buildConnectTerminateHCM vs buildHcm in cmd/atenet/internal/router/xds.go).
+// Call Close to tear both down.
 func NewRouterClient(ctx context.Context) (*RouterClient, error) {
 	config, err := ateclient.LoadConfig(KubeConfig, KubeContext)
 	if err != nil {
@@ -64,17 +69,26 @@ func NewRouterClient(ctx context.Context) (*RouterClient, error) {
 		return nil, err
 	}
 
+	connectPort, stopConnect, err := portforward.ServicePortForward(ctx, config, clientset, routerNamespace, routerService, 8081)
+	if err != nil {
+		stop()
+		return nil, fmt.Errorf("port-forwarding router connect port: %w", err)
+	}
+
 	return &RouterClient{
-		addr:    fmt.Sprintf("127.0.0.1:%d", localPort),
-		baseURL: fmt.Sprintf("http://127.0.0.1:%d", localPort),
-		http:    &http.Client{Timeout: 30 * time.Second},
-		stop:    stop,
+		addr:        fmt.Sprintf("127.0.0.1:%d", localPort),
+		baseURL:     fmt.Sprintf("http://127.0.0.1:%d", localPort),
+		connectAddr: fmt.Sprintf("127.0.0.1:%d", connectPort),
+		http:        &http.Client{Timeout: 30 * time.Second},
+		stop:        stop,
+		stopConnect: stopConnect,
 	}, nil
 }
 
-// Close stops the port-forward tunnel.
+// Close stops the port-forward tunnels.
 func (c *RouterClient) Close() {
 	c.stop()
+	c.stopConnect()
 }
 
 // Get issues GET path to actor through the router, setting the actor's mesh Host
@@ -92,13 +106,16 @@ func (c *RouterClient) Get(ctx context.Context, actorRef resources.ActorRef, pat
 // Connect opens a raw HTTP CONNECT tunnel through the router to port on the
 // actor, mirroring how atenet-router's arbitrary-port ingress support is
 // reached: the target port is carried in the CONNECT request's :authority
-// (actorRef.DNSName():port), not a header. On success the returned net.Conn
-// carries the actor's raw response bytes; the caller must close it.
+// (actorRef.DNSName():port), not a header. This dials the router's dedicated
+// CONNECT port (see NewRouterClient), not the plain ingress port Get uses --
+// only the connect_terminate listener has AllowConnect set. On success the
+// returned net.Conn carries the actor's raw response bytes; the caller must
+// close it.
 func (c *RouterClient) Connect(ctx context.Context, actorRef resources.ActorRef, port int) (net.Conn, error) {
 	destination := fmt.Sprintf("%s:%d", actorRef.DNSName(), port)
 
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", c.addr)
+	conn, err := d.DialContext(ctx, "tcp", c.connectAddr)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to router: %w", err)
 	}

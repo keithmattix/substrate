@@ -1158,13 +1158,6 @@ func (x *XdsServer) buildMainInternalListener() *listenerv3.Listener {
 // reinjected through main_internal (which has no reliable Host header of its
 // own -- see handleRequestHeaders).
 //
-// This replaces an earlier attempt that used header_to_metadata to write a
-// dynamic-metadata namespace instead: that metadata never actually reached
-// ext_proc across the internal-listener hop. Filter state, explicitly shared
-// with the upstream internal connection (shared_with_upstream), is the
-// mechanism Envoy itself documents for carrying a CONNECT request's
-// :authority across exactly this hop.
-//
 // Shared by buildConnectTerminateHCM (the only place the original CONNECT
 // :authority is ever seen) and buildHcm's ingress-only case (buildHcm's
 // main_internal case must NOT re-run this: it would capture the tunneled
@@ -1267,6 +1260,16 @@ func buildConnectRoutes() *routev3.RouteConfiguration {
 								ClusterSpecifier: &routev3.RouteAction_Cluster{
 									Cluster: MainInternalName,
 								},
+								// Unlike a WebSocket upgrade, Envoy never disables the route
+								// timeout once a CONNECT tunnel is established, so the
+								// ordinary request timeout applies to the tunnel's entire
+								// lifetime. Left unset here it would fall back to Envoy's
+								// global default of 15s, silently killing every CONNECT
+								// tunnel through this router after 15 seconds regardless of
+								// activity. 0 explicitly disables it; the tunnel's lifetime
+								// is bounded by other means (idle timeout, connection drain,
+								// either side closing).
+								Timeout: durationpb.New(0),
 							},
 						},
 					},
