@@ -21,9 +21,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/atunnel"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -162,6 +165,20 @@ func (s *ExtProcServer) handleRequestHeaders(
 		return nil, nil, metadata, "", "", "", ResumeOutcomeNone, invalidHostErr(authority, err)
 	}
 
+	// The port to reach on the actor itself travels in the same authority:
+	// for CONNECT-tunneled traffic it's the arbitrary port the client asked
+	// for (e.g. ":9090"), and for plain ingress_http/ingress_https it's
+	// absent, defaulting to the actor's normal port 80. atunnel's Server
+	// can't learn this any other way -- its Config.Upstream is fixed for
+	// its whole lifetime -- so it's forwarded via TargetPortHeader (see
+	// atunnel.Server.NewServer's Rewrite func).
+	targetPort := 80
+	if _, portStr, err := net.SplitHostPort(authority); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p <= 65535 {
+			targetPort = p
+		}
+	}
+
 	// Admit the request to the parking lot before resuming. While resume is
 	// in-flight the request occupies a slot; if the actor's worker pool is
 	// momentarily saturated the resumer parks (retries) here rather than failing
@@ -196,12 +213,11 @@ func (s *ExtProcServer) handleRequestHeaders(
 	}
 
 	// The actor is reached through the in-worker atunnel ingress server, which
-	// listens on :443 (mTLS) and forwards to the actor's :80. The worker no
-	// longer DNATs pod-IP:80 to the actor, so the router dials :443 and the
-	// ORIGINAL_DST cluster's upstream TLS context presents the router's
-	// podidentity client cert (see buildOriginalDstCluster and
+	// listens on :443 (mTLS) and forwards to targetPort on the actor. The
+	// worker no longer DNATs pod-IP:80 to the actor, so the router dials :443
+	// and the ORIGINAL_DST cluster's upstream TLS context presents the
+	// router's podidentity client cert (see buildOriginalDstCluster and
 	// buildUpstreamTransportSocket).
-	// TODO(bowei) -- handle more than port 80 on the actor.
 	targetAddr := net.JoinHostPort(workerIP, "443")
 
 	slog.InfoContext(ctx, "Route ok", slog.Any("actor", actorRef), slog.String("targetAddr", targetAddr))
@@ -225,6 +241,16 @@ func (s *ExtProcServer) handleRequestHeaders(
 	// original Host (actor DNS name).
 	mutation := &extprocv3.HeaderMutation{}
 	addRoutingMutations(targetAddr, metadata.host, s.routeViaAuthority, mutation)
+	// atunnel picks which port on the actor to reach from this header (the
+	// CONNECT authority's port, or 80 for plain ingress -- see targetPort
+	// above); it can't read Envoy's dynamic metadata directly.
+	mutation.SetHeaders = append(mutation.SetHeaders, &corev3.HeaderValueOption{
+		Header: &corev3.HeaderValue{
+			Key:      atunnel.TargetPortHeader,
+			RawValue: []byte(strconv.Itoa(targetPort)),
+		},
+		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+	})
 
 	return &extprocv3.HeadersResponse{
 		Response: &extprocv3.CommonResponse{

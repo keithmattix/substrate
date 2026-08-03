@@ -223,7 +223,7 @@ func (s *RouterServer) Run(ctx context.Context) error {
 		s.extprocSrv = NewExtProcServer(s.cfg.ExtprocPort, s.apiClient, routeDuration, parkCfg, parkMetrics, s.cfg.atenetRouter().routeViaAuthority())
 	}
 	if s.networkExtprocSrv == nil {
-		s.networkExtprocSrv = NewNetworkExtProcServer(s.apiClient, parkCfg, parkMetrics)
+		s.networkExtprocSrv = NewNetworkExtProcServer(s.apiClient)
 	}
 
 	s.health = newRouterHealth(s.cfg.HealthInterval, s.clientset, s.apiClient, s.cfg)

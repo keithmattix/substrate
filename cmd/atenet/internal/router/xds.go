@@ -134,6 +134,17 @@ const (
 	// the connect_terminate -> main_internal internal-listener hop. Kept only
 	// for that one remaining forwarding reference pending the same migration
 	// on the network leg.
+	//
+	// TODO(router): the network leg can't actually make that same migration.
+	// NetworkExternalProcessor has no request_attributes (or any other
+	// filter-state-reading) field analogous to the HTTP ext_proc filter's --
+	// its ProcessingRequest carries only dynamic metadata (Metadata), the
+	// exact mechanism already proven unreliable across this hop. Until Envoy
+	// adds a way to pass filter state to a network ext_proc filter, CONNECT
+	// scenarios that fall through to the raw TCP leg (non-HTTP payloads, and
+	// TLS-wrapped payloads via buildMainInternalListener's transport-protocol
+	// match) cannot resolve the actor and fail with "missing
+	// dev.substrate/authority metadata" -- see NetworkExtProcServer.handleFirstFrame.
 	SubstrateMetadataNamespace = "dev.substrate"
 
 	// AuthorityFilterStateKey is the filter-state object key holding a CONNECT
@@ -201,6 +212,14 @@ const envoyDefaultStreamIdleTimeout = 5 * time.Minute
 // read. Parking is not supported because the semantics
 // are too new.
 const defaultExtProcMaxConnections = 512
+
+// defaultTcpEarlyDataBytes bounds how much downstream data tcp_proxy buffers
+// (see buildTcpConnectFilterChain's UpstreamConnectMode) while waiting for the
+// network ext_proc round trip to resolve the actor and establish the upstream
+// connection. 16KiB comfortably covers a TLS ClientHello or a few app-layer
+// frames; past this, tcp_proxy read-disables the downstream connection rather
+// than failing it.
+const defaultTcpEarlyDataBytes = 16384
 
 // XdsServer implements an aggregated discovery service server for dynamic Envoy router nodes.
 type XdsServer struct {
@@ -602,6 +621,19 @@ func (x *XdsServer) buildTCPCluster() *clusterv3.Cluster {
 				},
 			},
 		},
+		// Required for the network ext_proc filter's gRPC stream: without an
+		// explicit HTTP/2 upstream, Envoy defaults this cluster to HTTP/1.1,
+		// which can't carry gRPC framing at all (see buildCluster's identical
+		// setting for the HTTP ext_proc cluster).
+		TypedExtensionProtocolOptions: map[string]*anypb.Any{
+			httpProtocolOptionsName: newAny(&httpv3.HttpProtocolOptions{
+				UpstreamProtocolOptions: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
+					ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
+						ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{},
+					},
+				},
+			}),
+		},
 		LoadAssignment: &endpointv3.ClusterLoadAssignment{
 			ClusterName: TCPClusterName,
 			Endpoints: []*endpointv3.LocalityLbEndpoints{
@@ -967,29 +999,68 @@ func (x *XdsServer) buildMainInternalListener() *listenerv3.Listener {
 			},
 			x.buildTcpConnectFilterChain("main_internal"),
 		},
+		// Matching must key off transport protocol first, application
+		// protocol second -- not application protocol alone. tls_inspector
+		// populates the ALPN list (what ApplicationProtocolInput reads) from
+		// the ClientHello for ANY TLS connection, and a normal HTTPS client
+		// offers 'http/1.1' alongside 'h2' as a fallback; matching on
+		// application protocol alone would send that genuinely
+		// TLS-encrypted traffic into the "http" chain, which then tries to
+		// parse ciphertext as plaintext HTTP and resets the connection. Only
+		// a plaintext (raw_buffer) connection can actually carry plaintext
+		// HTTP/1.1 or h2c; anything else -- tls included -- falls through to
+		// the "tcp" chain, which forwards it opaquely.
 		FilterChainMatcher: &v3.Matcher{
 			MatcherType: &v3.Matcher_MatcherTree_{
 				MatcherTree: &v3.Matcher_MatcherTree{
 					Input: &xdsv3.TypedExtensionConfig{
-						Name:        "application-protocol",
-						TypedConfig: newAny(&networkv3.ApplicationProtocolInput{}),
+						Name:        "transport-protocol",
+						TypedConfig: newAny(&networkv3.TransportProtocolInput{}),
 					},
 					TreeType: &v3.Matcher_MatcherTree_ExactMatchMap{
 						ExactMatchMap: &v3.Matcher_MatcherTree_MatchMap{
 							Map: map[string]*v3.Matcher_OnMatch{
-								`'h2c'`: {
-									OnMatch: &v3.Matcher_OnMatch_Action{
-										Action: &xdsv3.TypedExtensionConfig{
-											Name:        "http",
-											TypedConfig: newAny(&wrapperspb.StringValue{Value: "http"}),
-										},
-									},
-								},
-								`'http/1.1'`: {
-									OnMatch: &v3.Matcher_OnMatch_Action{
-										Action: &xdsv3.TypedExtensionConfig{
-											Name:        "http",
-											TypedConfig: newAny(&wrapperspb.StringValue{Value: "http"}),
+								"raw_buffer": {
+									OnMatch: &v3.Matcher_OnMatch_Matcher{
+										Matcher: &v3.Matcher{
+											MatcherType: &v3.Matcher_MatcherTree_{
+												MatcherTree: &v3.Matcher_MatcherTree{
+													Input: &xdsv3.TypedExtensionConfig{
+														Name:        "application-protocol",
+														TypedConfig: newAny(&networkv3.ApplicationProtocolInput{}),
+													},
+													TreeType: &v3.Matcher_MatcherTree_ExactMatchMap{
+														ExactMatchMap: &v3.Matcher_MatcherTree_MatchMap{
+															Map: map[string]*v3.Matcher_OnMatch{
+																`'h2c'`: {
+																	OnMatch: &v3.Matcher_OnMatch_Action{
+																		Action: &xdsv3.TypedExtensionConfig{
+																			Name:        "http",
+																			TypedConfig: newAny(&wrapperspb.StringValue{Value: "http"}),
+																		},
+																	},
+																},
+																`'http/1.1'`: {
+																	OnMatch: &v3.Matcher_OnMatch_Action{
+																		Action: &xdsv3.TypedExtensionConfig{
+																			Name:        "http",
+																			TypedConfig: newAny(&wrapperspb.StringValue{Value: "http"}),
+																		},
+																	},
+																},
+															},
+														},
+													},
+												},
+											},
+											OnNoMatch: &v3.Matcher_OnMatch{
+												OnMatch: &v3.Matcher_OnMatch_Action{
+													Action: &xdsv3.TypedExtensionConfig{
+														Name:        "tcp",
+														TypedConfig: newAny(&wrapperspb.StringValue{Value: "tcp"}),
+													},
+												},
+											},
 										},
 									},
 								},
@@ -1186,6 +1257,17 @@ func (x *XdsServer) buildTcpConnectFilterChain(statPrefix string) *listenerv3.Fi
 							ForwardingNamespaces: &networkextprocv3.MetadataOptions_MetadataNamespaces{
 								Untyped: []string{OriginalDstMetadataKey, SubstrateMetadataNamespace},
 							},
+							// Lets handleFirstFrame's resolved worker address (see
+							// extproc_network.go) reach the connection's dynamic
+							// metadata for OriginalDstClusterName's MetadataKey to
+							// read -- the network-filter equivalent of buildHcm's
+							// same field for the HTTP leg. Requires Envoy >=
+							// envoyproxy/envoy@b27925c960 (first released in 1.39);
+							// earlier versions silently drop
+							// ProcessingResponse.DynamicMetadata for this filter.
+							ReceivingNamespaces: &networkextprocv3.MetadataOptions_MetadataNamespaces{
+								Untyped: []string{ActorTargetMetadataNamespace},
+							},
 						},
 					}),
 				},
@@ -1198,6 +1280,16 @@ func (x *XdsServer) buildTcpConnectFilterChain(statPrefix string) *listenerv3.Fi
 						ClusterSpecifier: &tcpproxyv3.TcpProxy_Cluster{
 							Cluster: OriginalDstClusterName,
 						},
+						// The default IMMEDIATE mode picks the upstream host (from
+						// OriginalDstClusterName's MetadataKey) synchronously at
+						// connection-accept, before the ext_proc filter above --
+						// which only fires from onData -- has ever run, so the
+						// original_dst metadata it sets always arrives too late.
+						// ON_DOWNSTREAM_DATA instead waits for the first byte of
+						// downstream data (buffered up to MaxEarlyDataBytes) before
+						// picking a host, which is after ext_proc's response.
+						UpstreamConnectMode: tcpproxyv3.UpstreamConnectMode_ON_DOWNSTREAM_DATA,
+						MaxEarlyDataBytes:   wrapperspb.UInt32(defaultTcpEarlyDataBytes),
 						AccessLog: []*accesslogv3.AccessLog{
 							{
 								Name: "envoy.access_loggers.stdout",

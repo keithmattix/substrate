@@ -27,6 +27,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,13 +35,16 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	v3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	networkextprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/ext_proc/v3"
 	tcpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	networkv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	secretgrpc "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -774,6 +778,14 @@ func TestXdsServer_BuildTCPCluster(t *testing.T) {
 	if eps.GetPortValue() != 50054 {
 		t.Errorf("Expected port 50054 (the network ext_proc port), got %d", eps.GetPortValue())
 	}
+
+	protocolOpts := &httpv3.HttpProtocolOptions{}
+	if err := c.GetTypedExtensionProtocolOptions()[httpProtocolOptionsName].UnmarshalTo(protocolOpts); err != nil {
+		t.Fatalf("Failed to unmarshal HttpProtocolOptions: %v", err)
+	}
+	if protocolOpts.GetExplicitHttpConfig().GetHttp2ProtocolOptions() == nil {
+		t.Error("Expected explicit HTTP/2 protocol options -- without them this cluster defaults to HTTP/1.1, which can't carry the network ext_proc filter's gRPC stream")
+	}
 }
 
 // TestXdsServer_NetworkExtProcCircuitBreaker mirrors
@@ -850,6 +862,9 @@ func TestXdsServer_BuildTcpConnectFilterChain(t *testing.T) {
 	if got := cfg.GetProcessingMode().GetProcessWrite(); got != networkextprocv3.ProcessingMode_SKIP {
 		t.Errorf("Expected ProcessWrite SKIP, got %s", got)
 	}
+	if got, want := cfg.GetMetadataOptions().GetReceivingNamespaces().GetUntyped(), []string{ActorTargetMetadataNamespace}; !slices.Equal(got, want) {
+		t.Errorf("Expected ReceivingNamespaces.Untyped %v, got %v -- without this, Envoy silently drops handleFirstFrame's resolved worker address instead of merging it into connection metadata", want, got)
+	}
 
 	tcpProxyFilter := fc.GetFilters()[1]
 	if got, want := tcpProxyFilter.GetName(), "envoy.filters.network.tcp_proxy"; got != want {
@@ -861,6 +876,80 @@ func TestXdsServer_BuildTcpConnectFilterChain(t *testing.T) {
 	}
 	if got := tcpProxyCfg.GetCluster(); got != OriginalDstClusterName {
 		t.Errorf("Expected tcp_proxy cluster %q, got %q", OriginalDstClusterName, got)
+	}
+	// IMMEDIATE (the proto default) picks the upstream host synchronously at
+	// connection-accept, before the network ext_proc filter above -- which
+	// only runs from onData -- has a chance to resolve the actor and set the
+	// metadata tcp_proxy's ORIGINAL_DST cluster needs.
+	if got, want := tcpProxyCfg.GetUpstreamConnectMode(), tcpproxyv3.UpstreamConnectMode_ON_DOWNSTREAM_DATA; got != want {
+		t.Errorf("Expected UpstreamConnectMode %s, got %s", want, got)
+	}
+	if got := tcpProxyCfg.GetMaxEarlyDataBytes().GetValue(); got == 0 {
+		t.Error("Expected a nonzero MaxEarlyDataBytes -- required whenever UpstreamConnectMode isn't IMMEDIATE")
+	}
+}
+
+// TestXdsServer_BuildMainInternalListener_FilterChainMatcherKeysOnTransportProtocol
+// covers a real bug: matching on application protocol (ALPN/plaintext
+// detection) alone incorrectly routed genuinely TLS-encrypted traffic into
+// the "http" chain, because tls_inspector populates the ALPN list from the
+// ClientHello for any TLS connection, and a normal HTTPS client offers
+// 'http/1.1' alongside 'h2' as a fallback. The matcher must key on transport
+// protocol first: only a plaintext ("raw_buffer") connection may fall into
+// the nested application-protocol match; anything else (tls included) must
+// go straight to "tcp".
+func TestXdsServer_BuildMainInternalListener_FilterChainMatcherKeysOnTransportProtocol(t *testing.T) {
+	x := NewXdsServer(18000)
+	matcher := x.buildMainInternalListener().GetFilterChainMatcher()
+
+	tree := matcher.GetMatcherTree()
+	if tree == nil {
+		t.Fatal("Expected a top-level MatcherTree")
+	}
+	inputCfg := &networkv3.TransportProtocolInput{}
+	if err := tree.GetInput().GetTypedConfig().UnmarshalTo(inputCfg); err != nil {
+		t.Fatalf("Expected the top-level matcher to key on TransportProtocolInput: %v", err)
+	}
+
+	// tls (or anything else/undetected) must fall through to "tcp" directly,
+	// never reaching the application-protocol match.
+	topAction := matcher.GetOnNoMatch().GetOnMatch().(*v3.Matcher_OnMatch_Action).Action
+	if topAction.GetName() != "tcp" {
+		t.Errorf("Expected top-level OnNoMatch (covers tls) to select %q, got %q", "tcp", topAction.GetName())
+	}
+
+	rawBufferEntry := tree.GetExactMatchMap().GetMap()["raw_buffer"]
+	if rawBufferEntry == nil {
+		t.Fatal("Expected a \"raw_buffer\" entry in the transport-protocol match map")
+	}
+	nested, ok := rawBufferEntry.GetOnMatch().(*v3.Matcher_OnMatch_Matcher)
+	if !ok {
+		t.Fatalf("Expected \"raw_buffer\" to nest into another Matcher, got %T", rawBufferEntry.GetOnMatch())
+	}
+
+	nestedTree := nested.Matcher.GetMatcherTree()
+	if nestedTree == nil {
+		t.Fatal("Expected the nested matcher to be a MatcherTree")
+	}
+	nestedInputCfg := &networkv3.ApplicationProtocolInput{}
+	if err := nestedTree.GetInput().GetTypedConfig().UnmarshalTo(nestedInputCfg); err != nil {
+		t.Fatalf("Expected the nested matcher to key on ApplicationProtocolInput: %v", err)
+	}
+
+	for _, alpn := range []string{`'h2c'`, `'http/1.1'`} {
+		entry := nestedTree.GetExactMatchMap().GetMap()[alpn]
+		if entry == nil {
+			t.Errorf("Expected an entry for %s in the nested application-protocol match map", alpn)
+			continue
+		}
+		action := entry.GetOnMatch().(*v3.Matcher_OnMatch_Action).Action
+		if action.GetName() != "http" {
+			t.Errorf("Expected %s to select %q, got %q", alpn, "http", action.GetName())
+		}
+	}
+	nestedNoMatchAction := nested.Matcher.GetOnNoMatch().GetOnMatch().(*v3.Matcher_OnMatch_Action).Action
+	if nestedNoMatchAction.GetName() != "tcp" {
+		t.Errorf("Expected the nested matcher's OnNoMatch to select %q, got %q", "tcp", nestedNoMatchAction.GetName())
 	}
 }
 

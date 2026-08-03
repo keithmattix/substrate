@@ -63,6 +63,23 @@ func dynamicMetadataTarget(dynamicMetadata *structpb.Struct) string {
 	return dynamicMetadata.GetFields()[ActorTargetMetadataNamespace].GetStructValue().GetFields()[OriginalDstHeader].GetStringValue()
 }
 
+// targetPortHeaderValue extracts the atunnel.TargetPortHeader value
+// handleRequestHeaders sets so atunnel's Server knows which port on the
+// actor to forward to (see server.go's Rewrite func).
+func targetPortHeaderValue(res *extprocv3.HeadersResponse) (string, bool) {
+	for _, h := range res.GetResponse().GetHeaderMutation().GetSetHeaders() {
+		if !strings.EqualFold(h.GetHeader().GetKey(), atunnel.TargetPortHeader) {
+			continue
+		}
+		v := h.GetHeader().GetValue()
+		if v == "" && len(h.GetHeader().GetRawValue()) > 0 {
+			v = string(h.GetHeader().GetRawValue())
+		}
+		return v, true
+	}
+	return "", false
+}
+
 type mockClient struct {
 	ateapipb.ControlClient
 	resumeFn func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error)
@@ -130,8 +147,9 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 		resumeErr      error
 		expectErr      bool
 		expectedErrStr string
-		expectedStatus envoy_type.StatusCode
-		expectedTarget string
+		expectedStatus     envoy_type.StatusCode
+		expectedTarget     string
+		expectedTargetPort string
 	}{
 		{
 			name:           "invalid host returns 404 identifying the host",
@@ -200,8 +218,9 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 					WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIp: "10.0.0.52"},
 				},
 			},
-			expectErr:      false,
-			expectedTarget: "10.0.0.52:443",
+			expectErr:          false,
+			expectedTarget:     "10.0.0.52:443",
+			expectedTargetPort: "80",
 		},
 	}
 
@@ -263,8 +282,8 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 			}
 
 			mutation := res.Response.GetHeaderMutation()
-			if len(mutation.GetSetHeaders()) != 2 {
-				t.Fatalf("expected exactly two header options, found: %v", mutation.GetSetHeaders())
+			if len(mutation.GetSetHeaders()) != 3 {
+				t.Fatalf("expected exactly three header options, found: %v", mutation.GetSetHeaders())
 			}
 
 			gotMutations := map[string]string{}
@@ -280,6 +299,9 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 			if got := dynamicMetadataTarget(dynamicMetadata); got != tc.expectedTarget {
 				t.Errorf("invalid destination mapping found: %s, expected: %s", got, tc.expectedTarget)
 			}
+			if got, ok := targetPortHeaderValue(res); !ok || got != tc.expectedTargetPort {
+				t.Errorf("%s = %q (present: %v), want %q", atunnel.TargetPortHeader, got, ok, tc.expectedTargetPort)
+			}
 
 			// Confirm that query logs recorded metric trace details
 			s.recorder.AddRouterRequest(time.Now(), 10*time.Millisecond, "Route ok", tc.expectedTarget, metadata)
@@ -293,11 +315,11 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 
 // TestExtProcHandlesConnectMethod locks in that a CONNECT request (used for
 // atenet-router's arbitrary-port ingress support -- the target port travels in
-// :authority, e.g. "<actor-dns>:9090") resolves the actor and produces the
-// same "<workerIP>:443" original-dst mutation as an ordinary request. The
-// router only ever dials the worker's atunnel server; picking the actor's
-// arbitrary port from the CONNECT authority is atunnel's job, not
-// handleRequestHeaders', so this method should need no special-casing here.
+// :authority, e.g. "<actor-dns>:9090") resolves the actor, produces the same
+// "<workerIP>:443" original-dst mutation as an ordinary request (the router
+// only ever dials the worker's atunnel server), and forwards the arbitrary
+// port itself via atunnel.TargetPortHeader so atunnel knows which port on the
+// actor to reach.
 func TestExtProcHandlesConnectMethod(t *testing.T) {
 	const testUUID = "123e4567-e89b-12d3-a456-426614174000"
 
@@ -319,7 +341,7 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 	}
 
 	authority := testUUID + ".team-a.actors.resources.substrate.ate.dev:9090"
-	_, dynamicMetadata, _, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, authority))
+	res, dynamicMetadata, _, target, _, _, _, err := s.handleRequestHeaders(context.Background(), reqHeaders, authorityAttributes(t, authority))
 	if err != nil {
 		t.Fatalf("ext_proc processing error for CONNECT: %v", err)
 	}
@@ -330,6 +352,9 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 	}
 	if got := dynamicMetadataTarget(dynamicMetadata); got != wantTarget {
 		t.Errorf("invalid destination mapping found: %s, expected: %s", got, wantTarget)
+	}
+	if got, ok := targetPortHeaderValue(res); !ok || got != "9090" {
+		t.Errorf("%s = %q (present: %v), want %q", atunnel.TargetPortHeader, got, ok, "9090")
 	}
 }
 

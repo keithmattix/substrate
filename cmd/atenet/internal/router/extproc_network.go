@@ -37,14 +37,17 @@ import (
 // which actor/atespace a raw TCP connection is addressed to.
 const substrateAuthorityMetadataKey = "authority"
 
-// networkOriginalDstMetadataField is the field this server sets on its
-// ProcessingResponse's DynamicMetadata once an actor is resumed, carrying the
-// resolved worker atunnel address. Envoy's network ext_proc filter merges a
-// response's DynamicMetadata into the connection's dynamic metadata under
-// this filter's own namespace (envoy.filters.network.ext_proc by Envoy
-// convention); the tcp_proxy leg's cluster needs an OriginalDstLbConfig.MetadataKey
-// pointed at that namespace and this field name to pick it up -- the TCP
-// equivalent of OriginalDstHeader on the HTTP leg.
+// networkOriginalDstMetadataField is the field this server nests under
+// ActorTargetMetadataNamespace in its ProcessingResponse's DynamicMetadata
+// once an actor is resumed, carrying the resolved worker atunnel address.
+// Envoy's network ext_proc filter only ingests DynamicMetadata fields whose
+// top-level key is allowlisted via MetadataOptions.ReceivingNamespaces (see
+// buildTcpConnectFilterChain), merging that field's own (nested) value into
+// the connection's dynamic metadata under the same key; the tcp_proxy leg's
+// cluster needs an OriginalDstLbConfig.MetadataKey pointed at that namespace
+// and this field name to pick it up -- the TCP equivalent of OriginalDstHeader
+// on the HTTP leg. Requires Envoy >= envoyproxy/envoy@b27925c960 (first
+// released in 1.39) for the ReceivingNamespaces field to exist at all.
 const networkOriginalDstMetadataField = OriginalDstHeader
 
 // NetworkExtProcServer implements Envoy's network (L4) external processing
@@ -58,17 +61,17 @@ const networkOriginalDstMetadataField = OriginalDstHeader
 // start of the connection.
 type NetworkExtProcServer struct {
 	resumer *ActorResumer
-	parking *parkingLot
 }
 
-// NewNetworkExtProcServer constructs a NetworkExtProcServer. It keeps its own
-// parking lot rather than sharing ExtProcServer's: the HTTP and TCP legs carry
-// genuinely different traffic, and neither should be able to exhaust the
-// other's parking budget.
-func NewNetworkExtProcServer(apiClient ateapipb.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *parkingMetrics) *NetworkExtProcServer {
+// NewNetworkExtProcServer constructs a NetworkExtProcServer. Unlike
+// ExtProcServer it does not park: parking exists to retry/hold a request while
+// an actor's worker pool is briefly saturated, and how that interacts with a
+// long-lived TCP connection (whose ext_proc round trip guards a full data
+// frame's worth of end-user latency rather than a single header exchange) is
+// not yet understood -- resume failures here fail fast instead.
+func NewNetworkExtProcServer(apiClient ateapipb.ControlClient) *NetworkExtProcServer {
 	return &NetworkExtProcServer{
-		resumer: NewActorResumer(apiClient, withParking(parkCfg)),
-		parking: newParkingLot(parkCfg, parkMetrics),
+		resumer: NewActorResumer(apiClient),
 	}
 }
 
@@ -137,6 +140,15 @@ func (s *NetworkExtProcServer) Process(stream networkextprocv3.NetworkExternalPr
 // handleFirstFrame resumes the actor identified by the connection's forwarded
 // substrate authority metadata and builds the CONTINUE response that routes
 // the connection to that actor's worker.
+//
+// TODO(router): authority is always empty today (see SubstrateMetadataNamespace's
+// doc comment) -- dynamic metadata doesn't survive the connect_terminate ->
+// main_internal internal-listener hop, and NetworkExternalProcessor has no
+// filter-state-reading mechanism (no request_attributes) to fall back on the
+// way the HTTP leg's handleRequestHeaders does. Until Envoy adds one, every
+// CONNECT scenario that reaches this raw TCP leg -- non-HTTP payloads, and any
+// TLS-wrapped payload per buildMainInternalListener's transport-protocol
+// match -- fails here.
 func (s *NetworkExtProcServer) handleFirstFrame(ctx context.Context, req *networkextprocv3.ProcessingRequest) (*networkextprocv3.ProcessingResponse, error) {
 	authority := req.GetMetadata().GetFilterMetadata()[SubstrateMetadataNamespace].GetFields()[substrateAuthorityMetadataKey].GetStringValue()
 	if authority == "" {
@@ -148,13 +160,8 @@ func (s *NetworkExtProcServer) handleFirstFrame(ctx context.Context, req *networ
 		return nil, fmt.Errorf("invalid authority %q: %w", authority, err)
 	}
 
-	release, ok := s.parking.enter(ctx)
-	if !ok {
-		return nil, fmt.Errorf("parking lot full for actor %s", actorRef)
-	}
 	slog.InfoContext(ctx, "ResumeActor", slog.Any("actor", actorRef))
 	actor, _, err := s.resumer.ResumeActor(ctx, actorRef)
-	release(parkOutcomeFor(err))
 	if err != nil {
 		return nil, fmt.Errorf("resuming actor %s: %w", actorRef, err)
 	}
@@ -164,14 +171,16 @@ func (s *NetworkExtProcServer) handleFirstFrame(ctx context.Context, req *networ
 		return nil, fmt.Errorf("actor %s routing failed: invalid worker IP %q", actorRef, workerIP)
 	}
 	// The actor is reached through the same in-worker atunnel ingress server as
-	// the HTTP leg (see extproc.go): atunnel picks the actor's specific port
-	// from the CONNECT authority it receives, keyed off the same original
-	// :authority this server resolved the actor from.
+	// the HTTP leg (see extproc.go). Unlike the HTTP leg, there is no header to
+	// carry the CONNECT authority's arbitrary port through atunnel's reverse
+	// proxy on this raw TCP leg -- untouched for now, pending its own fix.
 	targetAddr := net.JoinHostPort(workerIP, "443")
 	slog.InfoContext(ctx, "Route ok", slog.Any("actor", actorRef), slog.String("targetAddr", targetAddr))
 
 	dynamicMetadata, err := structpb.NewStruct(map[string]any{
-		networkOriginalDstMetadataField: targetAddr,
+		ActorTargetMetadataNamespace: map[string]any{
+			networkOriginalDstMetadataField: targetAddr,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building dynamic metadata for actor %s: %w", actorRef, err)
