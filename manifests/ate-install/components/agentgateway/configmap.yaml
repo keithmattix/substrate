@@ -33,18 +33,14 @@ data:
         # Matches the router's dataPlaneTraceRatio; static config, so a router
         # OTEL_TRACES_SAMPLER override must adjust it in step.
         randomSampling: 0.01
-      # Route CONNECT requests through the same pipeline as ordinary ones
-      # (ext_proc, then the dynamic backend) instead of denying them or
-      # tunneling them opaquely. This is what lets a client reach a port other
-      # than an actor's primary one: it opens a CONNECT tunnel whose
-      # :authority carries the target port (e.g. "<actor-dns-name>:9090"),
-      # and, since Route mode never re-tunnels/re-injects, that same
-      # authority is what ext_proc below resolves the actor and port from --
-      # no second listener hop is needed the way Envoy's connect_terminate ->
-      # main_internal double-hop is.
-      connect:
-        mode: route
 
+    # http/https serve direct (non-CONNECT) actor traffic only. connect.mode is
+    # a single global setting with no per-gateway override, and Tunnel mode's
+    # CONNECT interception happens below the per-request pipeline (at raw
+    # connection accept, before the method is even known) -- so a bind can't
+    # mix direct and CONNECT-tunnel traffic. CONNECT is served on its own
+    # dedicated binds below instead, mirroring Envoy's separate
+    # connect_terminate/connect_terminate_tls listeners.
     gateways:
       http:
         port: 8080
@@ -77,20 +73,9 @@ data:
             responseTrailerMode: skip
           # The router's ext_proc server (cmd/atenet/internal/router/extproc.go)
           # resolves the actor from
-          # attributes["envoy.filters.http.ext_proc"]["filter_state['dev.substrate.authority']"]
-          # for every dataplane. For Envoy that key is populated via a
-          # set_filter_state HTTP filter + RequestAttributes, because Envoy's
-          # CONNECT-tunnel-then-reinject architecture means the tunneled
-          # request's own raw :authority isn't trustworthy by the time
-          # ext_proc runs. Agentgateway has no such indirection to begin
-          # with -- Route-mode CONNECT is a single-pass pipeline (see
-          # frontendPolicies.connect above), so the request's own :authority
-          # is always authoritative. request.host (not a header lookup) is
-          # required here: agentgateway strips the raw Host header and moves
-          # it into the request URI's authority before this policy runs. The
-          # key below is kept identical to Envoy's only so the Go lookup
-          # stays one code path across both dataplanes -- it carries no
-          # filter-state meaning here.
+          # attributes["envoy.filters.http.ext_proc"]["filter_state['dev.substrate.authority']"].
+          # For direct (non-CONNECT) traffic on this route, request.host is the
+          # client's own :authority/Host -- there's no tunnel to look past.
           requestAttributes:
             "filter_state['dev.substrate.authority']": request.host
       backends:
@@ -105,3 +90,72 @@ data:
             key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
             root: /run/podidentity.podcert.ate.dev/trust-bundle.pem
             insecureHost: true
+
+    # CONNECT ingress, on its own dedicated ports (matching Envoy's
+    # connect/connect-tls listeners) because tunnelProtocol only applies to a
+    # whole bind, and Tunnel mode's global connect.mode would otherwise turn
+    # http/https above into CONNECT-only too. Terminating the tunnel here
+    # (rather than Route mode's raw pass-through) means every request inside
+    # it -- not just the initial CONNECT -- goes through ext_proc and dynamic
+    # backend resolution below, exactly like ordinary traffic. That's what
+    # lets a client reach a port other than an actor's primary one: the
+    # CONNECT's own :authority carries the target port (e.g.
+    # "<actor-dns-name>:9090"), survives into source.connectHeaders across
+    # every re-entered request (see the wildcard bind below), and resolves
+    # the actor and port the same way request.host does for direct traffic.
+    binds:
+    - port: 8081
+      tunnelProtocol: connect
+      listeners:
+      # No routes: this listener only ever sees the CONNECT itself: the
+      # request that matters is re-entered into the wildcard bind below.
+      - protocol: HTTP
+        routes: []
+    - port: 8444
+      tunnelProtocol: connect
+      listeners:
+      # Terminate the outer TLS before serving CONNECT, so the CONNECT
+      # request and its headers are encrypted on the wire -- otherwise this
+      # bind would ignore this listener's TLS config and serve CONNECT in
+      # plaintext on the raw socket.
+      - protocol: HTTPS
+        tls:
+          cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+          key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+        routes: []
+    # The wildcard internal bind: opens no socket, and is reached only by
+    # CONNECT re-entry from the binds above (regardless of the CONNECT's
+    # destination port, since an actor's exposed port is arbitrary and can't
+    # be enumerated ahead of time). This is where the actual actor route
+    # lives -- content-wise the same as substrate-actors above, except
+    # resolving the actor from the original CONNECT authority rather than
+    # this (re-entered) request's own, unrelated Host header.
+    - mode: internal
+      listeners:
+      - protocol: HTTP
+        routes:
+        - name: substrate-actors-tunneled
+          matches:
+          - path:
+              pathPrefix: /
+          policies:
+            extProc:
+              host: 127.0.0.1:50051
+              failureMode: failClosed
+              processingOptions:
+                requestHeaderMode: send
+                responseHeaderMode: skip
+                requestBodyMode: none
+                responseBodyMode: none
+                requestTrailerMode: skip
+                responseTrailerMode: skip
+              requestAttributes:
+                "filter_state['dev.substrate.authority']": source.connectHeaders["host"]
+          backends:
+          - dynamic: {}
+            policies:
+              backendTLS:
+                cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                root: /run/podidentity.podcert.ate.dev/trust-bundle.pem
+                insecureHost: true
