@@ -33,6 +33,17 @@ data:
         # Matches the router's dataPlaneTraceRatio; static config, so a router
         # OTEL_TRACES_SAMPLER override must adjust it in step.
         randomSampling: 0.01
+      # Route CONNECT requests through the same pipeline as ordinary ones
+      # (ext_proc, then the dynamic backend) instead of denying them or
+      # tunneling them opaquely. This is what lets a client reach a port other
+      # than an actor's primary one: it opens a CONNECT tunnel whose
+      # :authority carries the target port (e.g. "<actor-dns-name>:9090"),
+      # and, since Route mode never re-tunnels/re-injects, that same
+      # authority is what ext_proc below resolves the actor and port from --
+      # no second listener hop is needed the way Envoy's connect_terminate ->
+      # main_internal double-hop is.
+      connect:
+        mode: route
 
     gateways:
       http:
@@ -64,6 +75,24 @@ data:
             responseBodyMode: none
             requestTrailerMode: skip
             responseTrailerMode: skip
+          # The router's ext_proc server (cmd/atenet/internal/router/extproc.go)
+          # resolves the actor from
+          # attributes["envoy.filters.http.ext_proc"]["filter_state['dev.substrate.authority']"]
+          # for every dataplane. For Envoy that key is populated via a
+          # set_filter_state HTTP filter + RequestAttributes, because Envoy's
+          # CONNECT-tunnel-then-reinject architecture means the tunneled
+          # request's own raw :authority isn't trustworthy by the time
+          # ext_proc runs. Agentgateway has no such indirection to begin
+          # with -- Route-mode CONNECT is a single-pass pipeline (see
+          # frontendPolicies.connect above), so the request's own :authority
+          # is always authoritative. request.host (not a header lookup) is
+          # required here: agentgateway strips the raw Host header and moves
+          # it into the request URI's authority before this policy runs. The
+          # key below is kept identical to Envoy's only so the Go lookup
+          # stays one code path across both dataplanes -- it carries no
+          # filter-state meaning here.
+          requestAttributes:
+            "filter_state['dev.substrate.authority']": request.host
       backends:
       - dynamic: {}
         policies:
