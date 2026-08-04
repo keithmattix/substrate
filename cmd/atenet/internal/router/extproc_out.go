@@ -47,7 +47,12 @@ func addOriginalDstMutation(dst string, mut *extproc.HeaderMutation) {
 		&corev3.HeaderValueOption{
 			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 			Header: &corev3.HeaderValue{
-				Key:      OriginalDstHeader,
+				Key: OriginalDstHeader,
+				// Both fields are set: newer Envoy versions drop Value in
+				// favor of RawValue, but agentgateway's ext_proc client reads
+				// only Value and silently treats a RawValue-only mutation as
+				// setting the header to an empty string.
+				Value:    dst,
 				RawValue: []byte(dst),
 			},
 		},
@@ -64,7 +69,10 @@ func addRoutingMutations(dst, actorHost string, routeViaAuthority bool, mut *ext
 	mut.SetHeaders = append(mut.SetHeaders, &corev3.HeaderValueOption{
 		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 		Header: &corev3.HeaderValue{
-			Key:      atunnel.OriginalHostHeader,
+			Key: atunnel.OriginalHostHeader,
+			// Value is set alongside RawValue for agentgateway; see
+			// addOriginalDstMutation.
+			Value:    actorHost,
 			RawValue: []byte(actorHost),
 		},
 	})
@@ -72,7 +80,13 @@ func addRoutingMutations(dst, actorHost string, routeViaAuthority bool, mut *ext
 		mut.SetHeaders = append(mut.SetHeaders, &corev3.HeaderValueOption{
 			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 			Header: &corev3.HeaderValue{
-				Key:      authorityHeader,
+				Key: authorityHeader,
+				// Value is set alongside RawValue for agentgateway; see
+				// addOriginalDstMutation. This mutation in particular is load
+				// bearing for agentgateway: a RawValue-only :authority
+				// mutation is read back as an empty string, and agentgateway
+				// rejects any CONNECT request with an empty :authority.
+				Value:    dst,
 				RawValue: []byte(dst),
 			},
 		})
@@ -90,10 +104,11 @@ func immediateResponse(statusCode envoy_type.StatusCode, message string) *extpro
 				Headers: &extproc.HeaderMutation{
 					SetHeaders: []*corev3.HeaderValueOption{
 						{
-							// Using RawValues instead of Value: newer versions of Envoy
-							// drop Value and use RawValue
+							// Value is set alongside RawValue for agentgateway;
+							// see addOriginalDstMutation.
 							Header: &corev3.HeaderValue{
 								Key:      "content-type",
+								Value:    "text/plain",
 								RawValue: []byte("text/plain"),
 							},
 						},

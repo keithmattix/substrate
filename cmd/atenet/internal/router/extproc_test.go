@@ -515,19 +515,35 @@ func TestAddRoutingMutationsViaAuthority(t *testing.T) {
 	addRoutingMutations("10.0.0.52:443", "actor-1.team-a.actors.resources.substrate.ate.dev", true, mutation)
 
 	got := map[string]string{}
+	gotValue := map[string]string{}
 	for _, option := range mutation.GetSetHeaders() {
 		if option.GetAppendAction() != corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD {
 			t.Errorf("mutation %q append action = %v, want overwrite", option.GetHeader().GetKey(), option.GetAppendAction())
 		}
-		got[strings.ToLower(option.GetHeader().GetKey())] = string(option.GetHeader().GetRawValue())
+		key := strings.ToLower(option.GetHeader().GetKey())
+		got[key] = string(option.GetHeader().GetRawValue())
+		gotValue[key] = option.GetHeader().GetValue()
 	}
 	if got[OriginalDstHeader] != "10.0.0.52:443" {
-		t.Errorf("%s = %q", OriginalDstHeader, got[OriginalDstHeader])
+		t.Errorf("%s (RawValue) = %q", OriginalDstHeader, got[OriginalDstHeader])
 	}
 	if got[strings.ToLower(atunnel.OriginalHostHeader)] != "actor-1.team-a.actors.resources.substrate.ate.dev" {
-		t.Errorf("%s = %q", atunnel.OriginalHostHeader, got[strings.ToLower(atunnel.OriginalHostHeader)])
+		t.Errorf("%s (RawValue) = %q", atunnel.OriginalHostHeader, got[strings.ToLower(atunnel.OriginalHostHeader)])
 	}
 	if got[authorityHeader] != "10.0.0.52:443" {
-		t.Errorf("%s = %q", authorityHeader, got[authorityHeader])
+		t.Errorf("%s (RawValue) = %q", authorityHeader, got[authorityHeader])
+	}
+
+	// Value must be set alongside RawValue: agentgateway's ext_proc client
+	// reads only Value, and an empty :authority makes it reject any CONNECT
+	// request outright.
+	if gotValue[OriginalDstHeader] != "10.0.0.52:443" {
+		t.Errorf("%s (Value) = %q", OriginalDstHeader, gotValue[OriginalDstHeader])
+	}
+	if gotValue[strings.ToLower(atunnel.OriginalHostHeader)] != "actor-1.team-a.actors.resources.substrate.ate.dev" {
+		t.Errorf("%s (Value) = %q", atunnel.OriginalHostHeader, gotValue[strings.ToLower(atunnel.OriginalHostHeader)])
+	}
+	if gotValue[authorityHeader] != "10.0.0.52:443" {
+		t.Errorf("%s (Value) = %q", authorityHeader, gotValue[authorityHeader])
 	}
 }

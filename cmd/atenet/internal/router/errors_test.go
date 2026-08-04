@@ -225,10 +225,11 @@ func TestMapResumeError_IsReqError(t *testing.T) {
 	}
 }
 
-// TestImmediateResponseHeaderEncoding pins the RawValue encoding: Envoy drops
-// plain Value in ext_proc header mutations, so a Value-encoded header reaches
-// the client with an empty value (found live — content-type on every immediate
-// response had been arriving empty).
+// TestImmediateResponseHeaderEncoding pins the dual Value/RawValue encoding:
+// newer Envoy versions drop plain Value in ext_proc header mutations (found
+// live — content-type on every immediate response had been arriving empty),
+// but agentgateway's ext_proc client reads only Value and ignores RawValue.
+// Both must be set for the header to reach the client on either dataplane.
 func TestImmediateResponseHeaderEncoding(t *testing.T) {
 	t.Parallel()
 
@@ -241,7 +242,7 @@ func TestImmediateResponseHeaderEncoding(t *testing.T) {
 	if h.GetKey() != "content-type" || string(h.GetRawValue()) != "text/plain" {
 		t.Errorf("header = %q:%q (RawValue), want content-type:text/plain", h.GetKey(), h.GetRawValue())
 	}
-	if h.GetValue() != "" {
-		t.Errorf("header uses Value (%q); must use RawValue only", h.GetValue())
+	if h.GetValue() != "text/plain" {
+		t.Errorf("header Value = %q, want text/plain", h.GetValue())
 	}
 }
