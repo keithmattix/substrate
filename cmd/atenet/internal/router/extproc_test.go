@@ -133,12 +133,12 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 	const testUUID = "123e4567-e89b-12d3-a456-426614174000"
 
 	tests := []struct {
-		name           string
-		authority      string
-		resumeResp     *ateapipb.ResumeActorResponse
-		resumeErr      error
-		expectErr      bool
-		expectedErrStr string
+		name               string
+		authority          string
+		resumeResp         *ateapipb.ResumeActorResponse
+		resumeErr          error
+		expectErr          bool
+		expectedErrStr     string
 		expectedStatus     envoy_type.StatusCode
 		expectedTarget     string
 		expectedTargetPort string
