@@ -162,7 +162,7 @@ func (s *NetworkExtProcServer) handleFirstFrame(ctx context.Context, req *networ
 		return nil, fmt.Errorf("resuming actor %s: %w", actorRef, err)
 	}
 
-	workerIP := actor.GetAteomPodIp()
+	workerIP := actor.GetWorkerAssignment().GetWorkerPodIp()
 	if net.ParseIP(workerIP) == nil {
 		return nil, fmt.Errorf("actor %s routing failed: invalid worker IP %q", actorRef, workerIP)
 	}

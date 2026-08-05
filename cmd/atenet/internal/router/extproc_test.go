@@ -317,7 +317,7 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 
 	clientMock := &mockClient{
 		resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
-			return &ateapipb.ResumeActorResponse{Actor: &ateapipb.Actor{AteomPodIp: "10.0.0.52"}}, nil
+			return &ateapipb.ResumeActorResponse{Actor: &ateapipb.Actor{WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIp: "10.0.0.52"}}}, nil
 		},
 	}
 	s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{}, nil, false)

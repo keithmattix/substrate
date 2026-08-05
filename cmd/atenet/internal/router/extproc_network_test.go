@@ -35,7 +35,7 @@ func TestNetworkExtProcHandleFirstFrameNestsMetadata(t *testing.T) {
 	const testUUID = "123e4567-e89b-12d3-a456-426614174000"
 	clientMock := &mockClient{
 		resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
-			return &ateapipb.ResumeActorResponse{Actor: &ateapipb.Actor{AteomPodIp: "10.0.0.52"}}, nil
+			return &ateapipb.ResumeActorResponse{Actor: &ateapipb.Actor{WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIp: "10.0.0.52"}}}, nil
 		},
 	}
 	s := NewNetworkExtProcServer(clientMock)
