@@ -64,6 +64,7 @@ func addOriginalDstMutation(dst string, mut *extproc.HeaderMutation) {
 // :authority. Agentgateway v1.4.1's static dynamic backend instead dials the
 // request :authority, so that mode rewrites it to the worker atunnel address.
 // OriginalHostHeader lets atunnel restore and authorize the actor authority.
+// TODO: When we move away from Host heafer parsing, we can probably remove this.
 func addRoutingMutations(dst, actorHost string, routeViaAuthority bool, mut *extproc.HeaderMutation) {
 	addOriginalDstMutation(dst, mut)
 	mut.SetHeaders = append(mut.SetHeaders, &corev3.HeaderValueOption{
