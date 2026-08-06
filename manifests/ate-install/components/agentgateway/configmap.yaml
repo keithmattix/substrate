@@ -79,7 +79,14 @@ data:
           requestAttributes:
             "filter_state['dev.substrate.authority']": request.host
       backends:
-      - dynamic: {}
+      - dynamic:
+          # The router reports the resolved worker atunnel address (host:443)
+          # as dynamic metadata rather than rewriting :authority -- see
+          # OriginalDstMetadataKey/OriginalDstAddressKey in xds.go. Reading it
+          # here means :authority/Host stays the actor's real DNS name the
+          # whole way through, so atunnel authorizes it directly with no
+          # restore-the-original-Host header needed.
+          target: extproc["envoy.filters.listener.original_dst"]["local"]
         policies:
           # atunnel serves HTTPS on each worker pod IP. Verify its certificate
           # against the podidentity CA and present the router's podidentity
@@ -152,7 +159,9 @@ data:
               requestAttributes:
                 "filter_state['dev.substrate.authority']": source.connectHeaders["host"]
           backends:
-          - dynamic: {}
+          - dynamic:
+              # See substrate-actors' backend above.
+              target: extproc["envoy.filters.listener.original_dst"]["local"]
             policies:
               backendTLS:
                 cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem

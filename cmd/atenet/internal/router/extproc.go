@@ -44,24 +44,22 @@ import (
 // ExtProcServer implements the Envoy external processing gRPC server
 // to dynamically manage actor activations based on request traffic.
 type ExtProcServer struct {
-	port              int
-	apiClient         ateapipb.ControlClient
-	recorder          *QueryRecorder
-	resumer           *ActorResumer
-	routeDuration     metric.Float64Histogram
-	parking           *parkingLot
-	routeViaAuthority bool
+	port          int
+	apiClient     ateapipb.ControlClient
+	recorder      *QueryRecorder
+	resumer       *ActorResumer
+	routeDuration metric.Float64Histogram
+	parking       *parkingLot
 }
 
-func NewExtProcServer(port int, apiClient ateapipb.ControlClient, routeDuration metric.Float64Histogram, parkCfg ParkedRequestConfig, parkMetrics *parkingMetrics, routeViaAuthority bool) *ExtProcServer {
+func NewExtProcServer(port int, apiClient ateapipb.ControlClient, routeDuration metric.Float64Histogram, parkCfg ParkedRequestConfig, parkMetrics *parkingMetrics) *ExtProcServer {
 	return &ExtProcServer{
-		port:              port,
-		apiClient:         apiClient,
-		recorder:          NewQueryRecorder(100),
-		resumer:           NewActorResumer(apiClient, withParking(parkCfg)),
-		routeDuration:     routeDuration,
-		parking:           newParkingLot(parkCfg, parkMetrics),
-		routeViaAuthority: routeViaAuthority,
+		port:          port,
+		apiClient:     apiClient,
+		recorder:      NewQueryRecorder(100),
+		resumer:       NewActorResumer(apiClient, withParking(parkCfg)),
+		routeDuration: routeDuration,
+		parking:       newParkingLot(parkCfg, parkMetrics),
 	}
 }
 
@@ -240,11 +238,13 @@ func (s *ExtProcServer) handleRequestHeaders(
 			"actor %s routing failed", actorRef)
 	}
 
-	// Route by telling the ORIGINAL_DST cluster which worker atunnel address to
-	// dial, without touching :authority — atunnel authorizes the actor by the
-	// original Host (actor DNS name).
+	// Neither dataplane needs a header to route to the resolved worker
+	// address: both read it straight from dynamicMetadata above -- Envoy via
+	// OriginalDstClusterName's MetadataKey (see buildOriginalDstCluster),
+	// agentgateway via a CEL expression on its dynamic backend (see
+	// configmap.yaml). :authority/Host is never touched either, so atunnel
+	// authorizes the actor by its own, unmodified Host.
 	mutation := &extprocv3.HeaderMutation{}
-	addRoutingMutations(targetAddr, metadata.host, s.routeViaAuthority, mutation)
 	// atunnel picks which port on the actor to reach from this header (the
 	// CONNECT authority's port, or 80 for plain ingress -- see targetPort
 	// above). For envoy mode this duplicates what buildRoutes derives

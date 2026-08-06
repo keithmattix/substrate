@@ -15,7 +15,6 @@
 package router
 
 import (
-	"github.com/agent-substrate/substrate/internal/atunnel"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
@@ -33,67 +32,6 @@ type reqError struct {
 func (e *reqError) Error() string { return e.msg }
 func (e *reqError) Unwrap() error { return e.cause }
 
-// addOriginalDstMutation sets the header the ORIGINAL_DST cluster reads to pick
-// the upstream address (the worker atunnel IP:443). Unlike an :authority
-// rewrite it leaves the request Host intact, so atunnel still sees the actor
-// DNS name and can authorize the active actor.
-//
-// Nothing strips this header from the incoming request, so overwrite rather
-// than append: a client-supplied value must never influence the address Envoy
-// dials. ext_proc mutations already default to replace, but the default is
-// split across the deprecated append field and append_action — pin it.
-func addOriginalDstMutation(dst string, mut *extproc.HeaderMutation) {
-	mut.SetHeaders = append(mut.SetHeaders,
-		&corev3.HeaderValueOption{
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-			Header: &corev3.HeaderValue{
-				Key: OriginalDstHeader,
-				// Both fields are set: newer Envoy versions drop Value in
-				// favor of RawValue, but agentgateway's ext_proc client reads
-				// only Value and silently treats a RawValue-only mutation as
-				// setting the header to an empty string.
-				Value:    dst,
-				RawValue: []byte(dst),
-			},
-		},
-	)
-}
-
-// addRoutingMutations overwrites all routing metadata derived from the
-// control-plane result. Envoy dials OriginalDstHeader while preserving
-// :authority. Agentgateway v1.4.1's static dynamic backend instead dials the
-// request :authority, so that mode rewrites it to the worker atunnel address.
-// OriginalHostHeader lets atunnel restore and authorize the actor authority.
-// TODO: When we move away from Host heafer parsing, we can probably remove this.
-func addRoutingMutations(dst, actorHost string, routeViaAuthority bool, mut *extproc.HeaderMutation) {
-	addOriginalDstMutation(dst, mut)
-	mut.SetHeaders = append(mut.SetHeaders, &corev3.HeaderValueOption{
-		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		Header: &corev3.HeaderValue{
-			Key: atunnel.OriginalHostHeader,
-			// Value is set alongside RawValue for agentgateway; see
-			// addOriginalDstMutation.
-			Value:    actorHost,
-			RawValue: []byte(actorHost),
-		},
-	})
-	if routeViaAuthority {
-		mut.SetHeaders = append(mut.SetHeaders, &corev3.HeaderValueOption{
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-			Header: &corev3.HeaderValue{
-				Key: authorityHeader,
-				// Value is set alongside RawValue for agentgateway; see
-				// addOriginalDstMutation. This mutation in particular is load
-				// bearing for agentgateway: a RawValue-only :authority
-				// mutation is read back as an empty string, and agentgateway
-				// rejects any CONNECT request with an empty :authority.
-				Value:    dst,
-				RawValue: []byte(dst),
-			},
-		})
-	}
-}
-
 func immediateResponse(statusCode envoy_type.StatusCode, message string) *extproc.ProcessingResponse {
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_ImmediateResponse{
@@ -105,11 +43,8 @@ func immediateResponse(statusCode envoy_type.StatusCode, message string) *extpro
 				Headers: &extproc.HeaderMutation{
 					SetHeaders: []*corev3.HeaderValueOption{
 						{
-							// Value is set alongside RawValue for agentgateway;
-							// see addOriginalDstMutation.
 							Header: &corev3.HeaderValue{
 								Key:      "content-type",
-								Value:    "text/plain",
 								RawValue: []byte("text/plain"),
 							},
 						},

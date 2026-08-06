@@ -220,7 +220,7 @@ func (s *RouterServer) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create route-duration histogram: %w", err)
 		}
-		s.extprocSrv = NewExtProcServer(s.cfg.ExtprocPort, s.apiClient, routeDuration, parkCfg, parkMetrics, s.cfg.atenetRouter().routeViaAuthority())
+		s.extprocSrv = NewExtProcServer(s.cfg.ExtprocPort, s.apiClient, routeDuration, parkCfg, parkMetrics)
 	}
 	if s.networkExtprocSrv == nil {
 		s.networkExtprocSrv = NewNetworkExtProcServer(s.apiClient)

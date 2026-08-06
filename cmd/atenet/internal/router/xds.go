@@ -97,18 +97,15 @@ const (
 	// in dynamic metadata, while the request :authority stays the actor DNS
 	// name so atunnel can identify the active actor.
 	OriginalDstClusterName = "actor_original_dst"
-	// OriginalDstHeader is the literal HTTP header addOriginalDstMutation sets
-	// for router dataplanes that read routing information from headers rather
-	// than Envoy dynamic metadata (agentgateway's static dynamic backend --
-	// see routeViaAuthority). Unrelated to OriginalDstAddressKey below despite
-	// historically sharing a value: one is a wire-format header for a
-	// different dataplane, the other is an Envoy-internal metadata field name.
-	OriginalDstHeader = "x-ate-original-dst"
 
 	// OriginalDstMetadataKey is the dynamic-metadata namespace both the HTTP
 	// and network ext_proc servers write the resolved worker address and
 	// target port into, and the one namespace OriginalDstClusterName's
-	// MetadataKey reads from -- Envoy checks request-scoped metadata first,
+	// MetadataKey reads from for Envoy. The exact same struct also reaches
+	// agentgateway, which surfaces ext_proc's dynamic_metadata field verbatim
+	// to CEL as `extproc` (see configmap.yaml's dynamic backend `target`
+	// expression) -- one response payload, two dataplanes reading it their
+	// own way. Envoy checks request-scoped metadata first,
 	// then connection-scoped, so one namespace name serves the HTTP ext_proc's
 	// per-request metadata and the network ext_proc's per-connection metadata
 	// alike. Reuses Envoy's own envoy.filters.listener.original_dst listener

@@ -94,7 +94,7 @@ func TestHandleRequestHeadersDoesNotLogSensitiveData(t *testing.T) {
 		resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
 			return &ateapipb.ResumeActorResponse{Actor: &ateapipb.Actor{WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIp: "10.0.0.52"}}}, nil
 		},
-	}, nil, ParkedRequestConfig{}, nil, false)
+	}, nil, ParkedRequestConfig{}, nil)
 
 	reqHeaders := &extprocv3.HttpHeaders{
 		Headers: &corev3.HeaderMap{
@@ -233,7 +233,7 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 			// Parking disabled: these cases assert fail-fast mapping of resume
 			// errors (e.g. FailedPrecondition -> immediate 503). Parking behavior
 			// is covered separately in TestExtProc_ParkingLotFull and resumer_test.go.
-			s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{}, nil, false)
+			s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{}, nil)
 
 			reqHeaders := &extprocv3.HttpHeaders{
 				Headers: &corev3.HeaderMap{
@@ -274,19 +274,16 @@ func TestExtProcHeadersEvaluation(t *testing.T) {
 			}
 
 			mutation := res.Response.GetHeaderMutation()
-			if len(mutation.GetSetHeaders()) != 3 {
-				t.Fatalf("expected exactly three header options, found: %v", mutation.GetSetHeaders())
+			if len(mutation.GetSetHeaders()) != 1 {
+				t.Fatalf("expected exactly one header option (TargetPortHeader), found: %v", mutation.GetSetHeaders())
 			}
 
 			gotMutations := map[string]string{}
 			for _, headerOption := range mutation.GetSetHeaders() {
 				gotMutations[strings.ToLower(headerOption.Header.Key)] = string(headerOption.Header.RawValue)
 			}
-			if got := gotMutations[OriginalDstHeader]; got != tc.expectedTarget {
-				t.Errorf("destination mutation = %q, want %q", got, tc.expectedTarget)
-			}
-			if got := gotMutations[strings.ToLower(atunnel.OriginalHostHeader)]; got != tc.authority {
-				t.Errorf("original host mutation = %q, want %q", got, tc.authority)
+			if got := gotMutations[strings.ToLower(atunnel.TargetPortHeader)]; got != tc.expectedTargetPort {
+				t.Errorf("target port mutation = %q, want %q", got, tc.expectedTargetPort)
 			}
 			if got := dynamicMetadataTarget(dynamicMetadata); got != tc.expectedTarget {
 				t.Errorf("invalid destination mapping found: %s, expected: %s", got, tc.expectedTarget)
@@ -320,7 +317,7 @@ func TestExtProcHandlesConnectMethod(t *testing.T) {
 			return &ateapipb.ResumeActorResponse{Actor: &ateapipb.Actor{WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIp: "10.0.0.52"}}}, nil
 		},
 	}
-	s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{}, nil, false)
+	s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{}, nil)
 
 	// CONNECT requests carry no :path; the request-target lives in :authority.
 	reqHeaders := &extprocv3.HttpHeaders{
@@ -365,7 +362,7 @@ func TestExtProc_ParkingLotFull(t *testing.T) {
 
 	// A 1-slot lot with the slot already occupied deterministically simulates a
 	// full lot without needing a concurrent in-flight request.
-	s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{Budget: time.Second, Max: 1}, nil, false)
+	s := NewExtProcServer(50051, clientMock, nil, ParkedRequestConfig{Budget: time.Second, Max: 1}, nil)
 	release, ok := s.parking.enter(context.Background())
 	if !ok {
 		t.Fatal("priming enter should be admitted")
@@ -484,7 +481,7 @@ func TestRecordRouteDuration_Attributes(t *testing.T) {
 		t.Fatalf("failed to create histogram: %v", err)
 	}
 
-	s := NewExtProcServer(50051, nil, h, ParkedRequestConfig{}, nil, false)
+	s := NewExtProcServer(50051, nil, h, ParkedRequestConfig{}, nil)
 	s.recordRouteDuration(context.Background(), 10*time.Millisecond, "team-a-ns", "tmpl-a", classifyOutcome(nil), string(ResumeOutcomeTriggered))
 
 	var rm metricdata.ResourceMetrics
@@ -507,43 +504,5 @@ func TestRecordRouteDuration_Attributes(t *testing.T) {
 		} else if val.AsString() != want {
 			t.Errorf("attribute %q = %q, want %q", k, val.AsString(), want)
 		}
-	}
-}
-
-func TestAddRoutingMutationsViaAuthority(t *testing.T) {
-	mutation := &extprocv3.HeaderMutation{}
-	addRoutingMutations("10.0.0.52:443", "actor-1.team-a.actors.resources.substrate.ate.dev", true, mutation)
-
-	got := map[string]string{}
-	gotValue := map[string]string{}
-	for _, option := range mutation.GetSetHeaders() {
-		if option.GetAppendAction() != corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD {
-			t.Errorf("mutation %q append action = %v, want overwrite", option.GetHeader().GetKey(), option.GetAppendAction())
-		}
-		key := strings.ToLower(option.GetHeader().GetKey())
-		got[key] = string(option.GetHeader().GetRawValue())
-		gotValue[key] = option.GetHeader().GetValue()
-	}
-	if got[OriginalDstHeader] != "10.0.0.52:443" {
-		t.Errorf("%s (RawValue) = %q", OriginalDstHeader, got[OriginalDstHeader])
-	}
-	if got[strings.ToLower(atunnel.OriginalHostHeader)] != "actor-1.team-a.actors.resources.substrate.ate.dev" {
-		t.Errorf("%s (RawValue) = %q", atunnel.OriginalHostHeader, got[strings.ToLower(atunnel.OriginalHostHeader)])
-	}
-	if got[authorityHeader] != "10.0.0.52:443" {
-		t.Errorf("%s (RawValue) = %q", authorityHeader, got[authorityHeader])
-	}
-
-	// Value must be set alongside RawValue: agentgateway's ext_proc client
-	// reads only Value, and an empty :authority makes it reject any CONNECT
-	// request outright.
-	if gotValue[OriginalDstHeader] != "10.0.0.52:443" {
-		t.Errorf("%s (Value) = %q", OriginalDstHeader, gotValue[OriginalDstHeader])
-	}
-	if gotValue[strings.ToLower(atunnel.OriginalHostHeader)] != "actor-1.team-a.actors.resources.substrate.ate.dev" {
-		t.Errorf("%s (Value) = %q", atunnel.OriginalHostHeader, gotValue[strings.ToLower(atunnel.OriginalHostHeader)])
-	}
-	if gotValue[authorityHeader] != "10.0.0.52:443" {
-		t.Errorf("%s (Value) = %q", authorityHeader, gotValue[authorityHeader])
 	}
 }

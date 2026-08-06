@@ -29,10 +29,6 @@ type dataplaneHealthCheck struct {
 	expectedBody string
 }
 
-func (r atenetRouter) routeViaAuthority() bool {
-	return r == atenetRouterAgentgateway
-}
-
 func (r atenetRouter) healthCheck() dataplaneHealthCheck {
 	switch r {
 	case atenetRouterEnvoy:
