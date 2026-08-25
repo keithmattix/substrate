@@ -86,6 +86,75 @@ func TestGenerateED25519CA(t *testing.T) {
 	}
 }
 
+func TestTLSMaterialPEM(t *testing.T) {
+	ca, err := GenerateED25519CA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateED25519CA() error = %v", err)
+	}
+
+	chain, err := ca.TLSCertificateChainPEM()
+	if err != nil {
+		t.Fatalf("TLSCertificateChainPEM() error = %v", err)
+	}
+	block, rest := pem.Decode(chain)
+	if block == nil || block.Type != "CERTIFICATE" {
+		t.Fatalf("TLSCertificateChainPEM() first block = %#v, want CERTIFICATE", block)
+	}
+	if len(rest) != 0 {
+		t.Fatalf("TLSCertificateChainPEM() has unexpected additional data: %q", rest)
+	}
+	if !bytes.Equal(block.Bytes, ca.RootCertificate.Raw) {
+		t.Error("TLSCertificateChainPEM() certificate differs from the issuing certificate")
+	}
+
+	keyPEM, err := ca.TLSPrivateKeyPEM()
+	if err != nil {
+		t.Fatalf("TLSPrivateKeyPEM() error = %v", err)
+	}
+	block, rest = pem.Decode(keyPEM)
+	if block == nil || block.Type != "PRIVATE KEY" {
+		t.Fatalf("TLSPrivateKeyPEM() block = %#v, want PRIVATE KEY", block)
+	}
+	if len(rest) != 0 {
+		t.Fatalf("TLSPrivateKeyPEM() has unexpected additional data: %q", rest)
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("TLSPrivateKeyPEM() did not contain PKCS#8: %v", err)
+	}
+	if !keyMatchesCert(ca.RootCertificate, key.(crypto.Signer)) {
+		t.Error("TLSPrivateKeyPEM() key does not match the issuing certificate")
+	}
+}
+
+func TestTLSCertificateChainPEMIncludesIntermediates(t *testing.T) {
+	ca, err := GenerateED25519CA("issuer")
+	if err != nil {
+		t.Fatalf("GenerateED25519CA() error = %v", err)
+	}
+	intermediate, err := GenerateED25519CA("intermediate")
+	if err != nil {
+		t.Fatalf("GenerateED25519CA() error = %v", err)
+	}
+	ca.IntermediateCertificates = []*x509.Certificate{intermediate.RootCertificate}
+
+	chain, err := ca.TLSCertificateChainPEM()
+	if err != nil {
+		t.Fatalf("TLSCertificateChainPEM() error = %v", err)
+	}
+	issuerBlock, rest := pem.Decode(chain)
+	intermediateBlock, rest := pem.Decode(rest)
+	if issuerBlock == nil || intermediateBlock == nil || len(rest) != 0 {
+		t.Fatalf("TLSCertificateChainPEM() did not contain exactly two certificate blocks")
+	}
+	if !bytes.Equal(issuerBlock.Bytes, ca.RootCertificate.Raw) {
+		t.Error("TLSCertificateChainPEM() first certificate is not the issuer")
+	}
+	if !bytes.Equal(intermediateBlock.Bytes, intermediate.RootCertificate.Raw) {
+		t.Error("TLSCertificateChainPEM() second certificate is not the intermediate")
+	}
+}
+
 func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	ca1, err := GenerateED25519CA("ca-1")
 	if err != nil {

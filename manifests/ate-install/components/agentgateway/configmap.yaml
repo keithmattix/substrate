@@ -181,32 +181,56 @@ data:
       connect:
         mode: route
 
-    gateways:
-      egress:
-        port: 8443
-        protocol: HTTPS
+    binds:
+    # The actor tunnel is mutually authenticated with the actor identity SVID.
+    # CONNECT re-enters an internal bind selected by the requested port.
+    - port: 8443
+      tunnelProtocol: connect
+      listeners:
+      - protocol: HTTPS
         tls:
           cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
           key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
           root: /run/actor-id-ca-certs/ca.crt
+        routes: []
 
-    routes:
-    - name: substrate-egress
-      gateways:
-      - egress
-      policies:
-        extProc:
-          host: 127.0.0.1:50051
-          failureMode: failClosed
-          requestAttributes:
-            ate.extproc.direction: "'egress'"
-            source.certificate: source.certificate
-          processingOptions:
-            requestHeaderMode: send
-            responseHeaderMode: skip
-            requestBodyMode: none
-            responseBodyMode: none
-            requestTrailerMode: skip
-            responseTrailerMode: skip
-      backends:
-      - dynamic: {}
+    # Terminate tunneled HTTPS with AgentGateway's native dynamic CA. The
+    # selected Substrate issuer is exported as a standard PEM chain and key.
+    - port: 443
+      mode: internal
+      listeners:
+      - protocol: HTTPS
+        tls:
+          mode: dynamicCa
+          cert: /run/egress-mitm/tls.crt
+          key: /run/egress-mitm/tls.key
+        routes:
+        - policies:
+            substrateEgress:
+              host: api.ate-system.svc:443
+              policies:
+                backendTLS:
+                  cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  root: /run/servicedns-ca/trust-bundle.pem
+          backends:
+          - dynamic: {}
+            policies:
+              backendTLS: {}
+
+    # Cleartext HTTP passes through the same egress PEP without TLS termination.
+    - port: 80
+      mode: internal
+      listeners:
+      - protocol: HTTP
+        routes:
+        - policies:
+            substrateEgress:
+              host: api.ate-system.svc:443
+              policies:
+                backendTLS:
+                  cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  root: /run/servicedns-ca/trust-bundle.pem
+          backends:
+          - dynamic: {}

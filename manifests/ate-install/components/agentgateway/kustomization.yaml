@@ -149,9 +149,40 @@ patches:
           - name: actor-id-ca-certs
             mountPath: /run/actor-id-ca-certs
             readOnly: true
-      - op: add
-        path: /spec/template/spec/containers/1/args/-
-        value: --atenet-router=agentgateway
+          - name: podidentity
+            mountPath: /run/podidentity.podcert.ate.dev
+            readOnly: true
+          - name: servicedns-ca
+            mountPath: /run/servicedns-ca
+            readOnly: true
+          - name: egress-mitm
+            mountPath: /run/egress-mitm
+            readOnly: true
       - op: replace
         path: /spec/template/spec/volumes/0/configMap/name
         value: atenet-egress-agentgateway-config
+      - op: remove
+        path: /spec/template/spec/containers/1
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: servicedns-ca
+          projected:
+            sources:
+            - clusterTrustBundle:
+                signerName: servicedns.podcert.ate.dev/identity
+                labelSelector:
+                  matchLabels:
+                    podcert.ate.dev/canarying: live
+                path: trust-bundle.pem
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: egress-mitm
+          secret:
+            secretName: egress-mitm-ca-pool
+            items:
+            - key: tls.crt
+              path: tls.crt
+            - key: tls.key
+              path: tls.key

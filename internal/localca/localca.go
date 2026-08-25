@@ -41,6 +41,37 @@ type CA struct {
 	IntermediateCertificates []*x509.Certificate
 }
 
+// TLSCertificateChainPEM returns the issuing certificate followed by the
+// certificates above it, in the order TLS peers expect to receive them.
+func (ca *CA) TLSCertificateChainPEM() ([]byte, error) {
+	if err := ca.Validate(); err != nil {
+		return nil, err
+	}
+
+	chain := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.RootCertificate.Raw})
+	for _, intermediate := range ca.IntermediateCertificates {
+		if intermediate == nil {
+			return nil, fmt.Errorf("ca certificate chain: contains nil intermediate")
+		}
+		chain = append(chain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: intermediate.Raw})...)
+	}
+	return chain, nil
+}
+
+// TLSPrivateKeyPEM returns the CA signing key in the PKCS#8 PEM encoding used
+// by TLS servers.
+func (ca *CA) TLSPrivateKeyPEM() ([]byte, error) {
+	if err := ca.Validate(); err != nil {
+		return nil, err
+	}
+
+	key, err := x509.MarshalPKCS8PrivateKey(ca.SigningKey)
+	if err != nil {
+		return nil, fmt.Errorf("ca key: serializing PKCS#8: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), nil
+}
+
 // Validate reports whether the CA is well formed enough to sign with.
 func (ca *CA) Validate() error {
 	if ca == nil {

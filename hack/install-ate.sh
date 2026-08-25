@@ -489,10 +489,13 @@ create_egress_mitm_ca_pool_secret() {
     --common-name="substrate egress MITM CA"
 }
 
-# Only the sdsmint egress variant mounts this pool.
+# The AgentGateway egress implementation reads the exported TLS certificate
+# chain and key, while the Envoy implementation reads the pool.
 ensure_egress_mitm_ca_pool_secret() {
-  [[ "$(atenet_router)" != "agentgateway" ]] || return 0
-  [[ "${ATE_EXPERIMENTAL_USE_SDSMINT:-false}" == "true" ]] || return 0
+  if [[ "$(atenet_router)" != "agentgateway" \
+    && "${ATE_EXPERIMENTAL_USE_SDSMINT:-false}" != "true" ]]; then
+    return 0
+  fi
   run_kubectl get secret -n ate-system egress-mitm-ca-pool >/dev/null 2>&1 \
     || create_egress_mitm_ca_pool_secret
 }
