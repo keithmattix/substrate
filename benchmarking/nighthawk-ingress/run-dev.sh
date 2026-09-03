@@ -22,9 +22,11 @@
 # up by the user — see benchmarking/nighthawk-ingress/README.md.
 #
 #   ./benchmarking/nighthawk-ingress/run-dev.sh --envoy-cpu 2
+#   ./benchmarking/nighthawk-ingress/run-dev.sh --dataplane agentgateway --proxy-cpu 2
 set -euo pipefail
 
 ENVOY_CPU=2
+DATAPLANE="envoy"
 ACTORS=100
 TAIL_LATENCY_SLO_MS=25
 ATESPACE="ingress-benchmark"
@@ -36,6 +38,8 @@ usage() {
   cat <<EOF
 Usage: $0 [options]
   --envoy-cpu N             router cpu pin, the independent variable (default: ${ENVOY_CPU})
+  --proxy-cpu N             alias for --envoy-cpu; use with --dataplane agentgateway
+  --dataplane NAME          envoy or agentgateway (default: ${DATAPLANE})
   --actors N                actor fleet size; needs that many workers Running (default: ${ACTORS})
   --tail-latency-slo-ms N   SLO bound; 0 disables (default: ${TAIL_LATENCY_SLO_MS})
   --atespace NAME           actor namespace (default: ${ATESPACE})
@@ -47,6 +51,8 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --envoy-cpu) ENVOY_CPU="$2"; shift 2 ;;
+    --proxy-cpu) ENVOY_CPU="$2"; shift 2 ;;
+    --dataplane) DATAPLANE="$2"; shift 2 ;;
     --actors) ACTORS="$2"; shift 2 ;;
     --tail-latency-slo-ms) TAIL_LATENCY_SLO_MS="$2"; shift 2 ;;
     --atespace) ATESPACE="$2"; shift 2 ;;
@@ -55,6 +61,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown flag: $1" >&2; usage ;;
   esac
 done
+
+[[ "${DATAPLANE}" == "envoy" || "${DATAPLANE}" == "agentgateway" ]] || {
+  echo "ERROR: --dataplane must be envoy or agentgateway" >&2
+  exit 1
+}
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
@@ -96,6 +107,7 @@ fi
 echo ">>> run config:"
 echo "      cluster:              ${CLUSTER_NAME} (${CLUSTER_LOCATION})"
 echo "      envoy_cpu:            ${ENVOY_CPU}"
+echo "      dataplane:            ${DATAPLANE}"
 echo "      actors:               ${ACTORS}"
 echo "      workers running:      ${RUNNING_WORKERS}"
 echo "      tail_latency_slo_ms:  ${TAIL_LATENCY_SLO_MS}"
@@ -112,15 +124,16 @@ fi
 PY="${VENV}/bin/python"
 
 # --- pin the router if its current cpu differs --------------------------------
+CONTAINER="${DATAPLANE}"
 CURRENT_CPU="$(kubectl get deployment atenet-router -n ate-system \
-  -o jsonpath='{.spec.template.spec.containers[?(@.name=="envoy")].resources.limits.cpu}')"
+  -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${CONTAINER}\")].resources.limits.cpu}")"
 if [[ "${CURRENT_CPU}" != "${ENVOY_CPU}" ]]; then
-  echo ">>> pinning router: envoy cpu '${CURRENT_CPU:-unset}' -> ${ENVOY_CPU}"
+  echo ">>> pinning router: ${DATAPLANE} cpu '${CURRENT_CPU:-unset}' -> ${ENVOY_CPU}"
   "${PY}" -c "
 import sys
 sys.path.insert(0, 'benchmarking/automation')
 from testtypes import nighthawk_ingress
-nighthawk_ingress.pre_test({'nighthawk-ingress': {'envoyCpu': ${ENVOY_CPU}}})"
+nighthawk_ingress.pre_test({'nighthawk-ingress': {'dataplane': '${DATAPLANE}', '${DATAPLANE}Cpu': ${ENVOY_CPU}})"
 fi
 
 # --- runner image from the working tree ---------------------------------------
@@ -137,9 +150,9 @@ docker build --platform linux/amd64 \
 docker push "${IMAGE}"
 
 # --- render + submit the Job ---------------------------------------------------
-NAME="ingress_routercap_envoy_${ENVOY_CPU}cpu"
+NAME="ingress_routercap_${DATAPLANE}_${ENVOY_CPU}cpu"
 JOB="runner-ingress-routercap-${ENVOY_CPU}cpu-quick-$(date +%H%M%S)"
-export IMAGE JOB NAME DEST TAG ENVOY_CPU ACTORS TAIL_LATENCY_SLO_MS ATESPACE
+export IMAGE JOB NAME DEST TAG ENVOY_CPU DATAPLANE ACTORS TAIL_LATENCY_SLO_MS ATESPACE
 "${PY}" - <<'EOF' | kubectl apply -f -
 import os
 import sys
@@ -155,11 +168,12 @@ test = {
     "duration": "30m",
     "workerCount": int(os.environ["ACTORS"]),
     "nighthawk-ingress": {
-        "envoyCpu": int(os.environ["ENVOY_CPU"]),
+        "dataplane": os.environ["DATAPLANE"],
         "atespace": os.environ["ATESPACE"],
         "tailLatencySloMs": float(os.environ["TAIL_LATENCY_SLO_MS"]),
     },
 }
+test["nighthawk-ingress"][f'{os.environ["DATAPLANE"]}Cpu'] = int(os.environ["ENVOY_CPU"])
 orchestrator.validate_and_normalize_tests([test])
 subs = {
     "JOB_NAME": os.environ["JOB"],

@@ -17,7 +17,7 @@ client) in
 [adaptive mode](https://github.com/envoyproxy/nighthawk/blob/main/docs/root/adaptive_load_controller.md):
 it ramps open-loop load until a threshold breaks, binary-searches the
 boundary, and confirms with a longer run. Run
-it across `envoyCpu` configs to get a capacity-per-core curve, or
+it across proxy CPU configurations to get a capacity-per-core curve, or
 continuously in CI to catch routing-path performance regressions.
 
 \* *The SLO bounds latency **mean+2σ**, not a true percentile: Nighthawk's
@@ -78,10 +78,10 @@ One Kubernetes Job per `type: nighthawk-ingress` tests.yaml entry, driven by
 [`../automation/orchestrator.py`](../automation/orchestrator.py):
 
 1. **Pin the router.** The orchestrator patches the `atenet-router`
-   Deployment: both containers get cpu `requests=limits=envoyCpu`
-   (Guaranteed QoS), Envoy gets `--concurrency envoyCpu`, and the debug
-   log flags are dropped. Waits for rollout; every test tears substrate
-   down afterwards, so nothing leaks.
+   Deployment. Envoy tests give both Envoy and its ext_proc sidecar
+   `envoyCpu` and set Envoy `--concurrency`; AgentGateway tests give its
+   single proxy container `agentgatewayCpu`. Waits for rollout; every test
+   tears substrate down afterwards, so nothing leaks.
 2. **Create + warm actors.** The runner creates one glutton actor per
    WorkerPool worker (the entry's `workerCount`) via ateapi and POSTs
    `/ping` through the router with each actor's Host header until it
@@ -109,6 +109,17 @@ runs (`--tests`), e.g.:
   workerCount: 50        # also the actor fleet size: one warm actor per worker
   nighthawk-ingress:
     envoyCpu: 2
+    tailLatencySloMs: 25
+
+- name: ingress_routercap_agentgateway_2cpu
+  type: nighthawk-ingress
+  targetCluster: dev
+  duration: 30m
+  workerCount: 50
+  ateArgs: ["--atenet-router=agentgateway"]
+  nighthawk-ingress:
+    dataplane: agentgateway
+    agentgatewayCpu: 2
     tailLatencySloMs: 25
 ```
 
@@ -179,7 +190,9 @@ actors receiving rotated-Host traffic. Everything else lives in the
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `envoyCpu` | required | cpu `requests=limits` on both router containers, and Envoy's `--concurrency`. The benchmark's independent variable. |
+| `dataplane` | `envoy` | Proxy implementation: `envoy` or `agentgateway`. AgentGateway tests must add `ateArgs: ["--atenet-router=agentgateway"]`. |
+| `envoyCpu` | required for Envoy | cpu `requests=limits` on both router containers, and Envoy's `--concurrency`. |
+| `agentgatewayCpu` | required for AgentGateway | cpu `requests=limits` on AgentGateway's single proxy container. |
 | `atespace` | `ingress-benchmark` | Actor namespace; name it per *experiment*, never per run (atespaces are never auto-deleted). |
 | `tailLatencySloMs` | 0 (disabled) | The SLO: upper bound on latency mean+2σ (~p95 proxy), in ms. |
 | `successRateThreshold` | 0.999 | Minimum 2xx fraction of sent requests. |
@@ -212,5 +225,4 @@ stage's row in `stats.jsonl` tells you who saturated:
 - 502s — the actor fleet; raise `workerCount`.
 - latency climbing smoothly into the SLO — the router itself; that is
   the measurement.
-
 
